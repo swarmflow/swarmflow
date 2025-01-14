@@ -1,0 +1,39 @@
+services:
+  test_app:
+    build:
+      context: ./src
+      dockerfile: Dockerfile
+    container_name: test_fastapi_app
+    ports:
+      - "8001:8000"
+    depends_on:
+      test_postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-test_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-test_password}
+      POSTGRES_DB: ${POSTGRES_DB:-test_db}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-test_user}:${POSTGRES_PASSWORD:-test_password}@test_postgres:5432/${POSTGRES_DB:-test_db}
+    networks:
+      - test-network
+
+  test_postgres:
+    image: postgres:latest
+    container_name: test_postgres_db
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-test_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-test_password}
+      POSTGRES_DB: ${POSTGRES_DB:-test_db}
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+networks:
+  test-network:
+    driver: bridge

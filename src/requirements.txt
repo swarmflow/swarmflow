@@ -1,0 +1,7 @@
+jsonify
+flask
+fastapi
+uvicorn
+sqlalchemy
+pytest
+psycopg2-binary
