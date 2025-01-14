@@ -2,7 +2,7 @@ services:
   test_app:
     build:
       context: .
-      dockerfile: src/Dockerfile
+      dockerfile: core/Dockerfile
     container_name: test_fastapi_app
     ports:
       - "8001:8000"
@@ -20,7 +20,7 @@ services:
       sh -c "
         sleep 10 &&
         cd /app &&
-        pytest tests/test.py -v
+        pytest core/tests/test.py -v
       "
     networks:
       - test-network

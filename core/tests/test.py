@@ -1,10 +1,10 @@
 import pytest
 from httpx import AsyncClient
 from core.server.main import app
-from core.postgres_engine.postgres_engine import PostgrsEngine
+from core.postgres_engine.postgres_engine import PostgresEngine
 
 # Initialize Supabase Engine
-engine = SupabaseEngine()
+engine = PostgresEngine()
 
 @pytest.mark.asyncio
 async def test_health_check():

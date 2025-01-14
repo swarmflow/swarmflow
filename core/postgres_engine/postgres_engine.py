@@ -1,7 +1,7 @@
 from ..config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from ..server import app
+from ..server.main import app
 from flask import Flask, request, jsonify
 import psycopg2
 

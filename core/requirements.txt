@@ -6,3 +6,6 @@ sqlalchemy
 pytest
 psycopg2-binary
 httpx
+python-dotenv
+pytest-asyncio
+pytest-anyio
