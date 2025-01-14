@@ -1,7 +1,7 @@
 import pytest
 from httpx import AsyncClient
-from ..src.core import app
-from ..src.core.supabase_engine import SupabaseEngine
+from core.server.main import app
+from core.postgres_engine.postgres_engine import PostgrsEngine
 
 # Initialize Supabase Engine
 engine = SupabaseEngine()
