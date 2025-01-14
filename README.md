@@ -3,6 +3,7 @@ We are in pre-release, join our discord to learn more and contribute https://dis
 # Swarmflow
 
 An AI Swarm Workflow Orchastration tool.
+See [design.md](docs/design.md) to catchup on the design of the project.
 
 ## Prerequisites
 
