@@ -66,6 +66,7 @@ class PostgresEngine:
                     elif migration["action"] == "add_constraint":
                         sql = f"ALTER TABLE {table_name} ADD CONSTRAINT {migration['name']} {migration['definition']};"
                     connection.execute(text(sql))
+                    connection.commit()
                 return f"Table '{table_name}' successfully migrated."
         except SQLAlchemyError as e:
             return f"Error migrating table '{table_name}': {str(e)}"

@@ -16,9 +16,26 @@ services:
       PYTHONPATH: /app
     volumes:
       - .:/app
+    command: uvicorn core.server.main:app --host 0.0.0.0 --port 8000
+    networks:
+      - test-network
+
+  test_runner:
+    build:
+      context: .
+      dockerfile: core/Dockerfile
+    depends_on:
+      - test_app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      PYTHONPATH: /app
+    volumes:
+      - .:/app
     command: >
       sh -c "
-        sleep 10 &&
+        sleep 5 &&
         cd /app &&
         pytest core/tests/test.py -v
       "

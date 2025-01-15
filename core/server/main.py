@@ -20,6 +20,13 @@ app.add_middleware(
     allow_headers=["*"],  # Allow all headers
 )
 
+@app.get("/")
+async def health_check():
+    """
+    Health check endpoint to verify server status
+    """
+    return {"message": "Server is running"}
+
 # Define an endpoint to stream AI assistant responses using SSE
 # @app.post("/ai-assistant/")
 # async def ai_assistant(msg: str):
