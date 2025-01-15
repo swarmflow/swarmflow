@@ -16,26 +16,8 @@ services:
       PYTHONPATH: /app
     volumes:
       - .:/app
-    command: uvicorn core.server.main:app --host 0.0.0.0 --port 8000
-    networks:
-      - test-network
-
-  test_runner:
-    build:
-      context: .
-      dockerfile: core/Dockerfile
-    depends_on:
-      - test_app
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
-      PYTHONPATH: /app
-    volumes:
-      - .:/app
     command: >
       sh -c "
-        sleep 5 &&
         cd /app &&
         pytest core/tests/test.py -v
       "
@@ -49,6 +31,8 @@ services:
       - "5433:5432"
     env_file:
       - .env
+    tmpfs:
+      - /var/lib/postgresql/data
     networks:
       - test-network
     healthcheck:
@@ -61,5 +45,71 @@ networks:
   test-network:
     driver: bridge
 
-volumes:
-  postgres_data:
+
+# services:
+#   test_app:
+#     build:
+#       context: .
+#       dockerfile: core/Dockerfile
+#     container_name: test_fastapi_app
+#     ports:
+#       - "8001:8000"
+#     depends_on:
+#       test_postgres:
+#         condition: service_healthy
+#     env_file:
+#       - .env
+#     environment:
+#       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+#       PYTHONPATH: /app
+#     volumes:
+#       - .:/app
+#     command: uvicorn core.server.main:app --host 0.0.0.0 --port 8000
+#     networks:
+#       - test-network
+
+#   test_runner:
+#     build:
+#       context: .
+#       dockerfile: core/Dockerfile
+#     depends_on:
+#       - test_app
+#     env_file:
+#       - .env
+#     environment:
+#       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+#       PYTHONPATH: /app
+#     volumes:
+#       - .:/app
+#     command: >
+#       sh -c "
+#         sleep 5 &&
+#         cd /app &&
+#         pytest core/tests/test.py -v
+#       "
+#     networks:
+#       - test-network
+
+#   test_postgres:
+#     image: postgres:latest
+#     container_name: test_postgres_db
+#     ports:
+#       - "5433:5432"
+#     env_file:
+#       - .env
+#     tmpfs:
+#       - /var/lib/postgresql/data
+#     networks:
+#       - test-network
+#     healthcheck:
+#       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+#       interval: 5s
+#       timeout: 5s
+#       retries: 5
+
+# networks:
+#   test-network:
+#     driver: bridge
+
+# volumes:
+#   postgres_data:

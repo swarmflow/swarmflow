@@ -2,16 +2,15 @@ from ..config import Config
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from ..server.main import app
-from flask import Flask, request, jsonify
 import psycopg2
+from fastapi import Request
 
 class PostgresEngine:
-    '''
-    Utilize AI, PKL, and YAML to power PostgreSQL Configuration and Management.
-    '''
     def __init__(self):
         self.config = Config()
         self.engine = create_engine(self.config.postgres_url)
+        self.router = app.router
+
         
     def define_entity(self, table_name: str, columns: dict, db_url: str):
         """
@@ -27,12 +26,12 @@ class PostgresEngine:
         
         -- Add update trigger for updated_at
         CREATE OR REPLACE FUNCTION update_timestamp()
-        RETURNS TRIGGER AS $$
+        RETURNS TRIGGER AS $body$
         BEGIN
             NEW.updated_at = CURRENT_TIMESTAMP;
             RETURN NEW;
         END;
-        $$ language 'plpgsql';
+        $body$ language 'plpgsql';
         
         DROP TRIGGER IF EXISTS update_timestamp ON {table_name};
         CREATE TRIGGER update_timestamp
@@ -43,38 +42,41 @@ class PostgresEngine:
 
         try:
             with self.engine.connect() as connection:
-                connection.execute(text(create_table_sql))
+                with connection.begin():
+                    connection.execute(text(create_table_sql))
                 return f"Table '{table_name}' successfully defined with timestamps and triggers."
         except SQLAlchemyError as e:
             return f"Error defining table '{table_name}': {str(e)}"
 
+
     def migrate_entity(self, table_name: str, migrations: list, db_url: str):
-        """
-        Modify entities using PostgreSQL's robust ALTER TABLE capabilities.
-        """
         try:
             with self.engine.connect() as connection:
-                for migration in migrations:
-                    if migration["action"] == "add_column":
-                        sql = f"ALTER TABLE {table_name} ADD COLUMN {migration['name']} {migration['definition']};"
-                    elif migration["action"] == "drop_column":
-                        sql = f"ALTER TABLE {table_name} DROP COLUMN {migration['name']} CASCADE;"
-                    elif migration["action"] == "modify_column":
-                        sql = f"ALTER TABLE {table_name} ALTER COLUMN {migration['name']} TYPE {migration['definition']} USING {migration['name']}::{migration['definition']};"
-                    elif migration["action"] == "add_index":
-                        sql = f"CREATE INDEX idx_{table_name}_{migration['name']} ON {table_name} ({migration['columns']});"
-                    elif migration["action"] == "add_constraint":
-                        sql = f"ALTER TABLE {table_name} ADD CONSTRAINT {migration['name']} {migration['definition']};"
-                    connection.execute(text(sql))
-                    connection.commit()
+                with connection.begin():
+                    for migration in migrations:
+                        if migration["action"] == "add_column":
+                            sql = f"ALTER TABLE {table_name} ADD COLUMN {migration['name']} {migration['definition']};"
+                        elif migration["action"] == "drop_column":
+                            sql = f"ALTER TABLE {table_name} DROP COLUMN {migration['name']} CASCADE;"
+                        elif migration["action"] == "modify_column":
+                            # Split type modification and constraint modification
+                            type_sql = f"ALTER TABLE {table_name} ALTER COLUMN {migration['name']} TYPE TEXT;"
+                            connection.execute(text(type_sql))
+                            constraint_sql = f"ALTER TABLE {table_name} ALTER COLUMN {migration['name']} SET NOT NULL;"
+                            connection.execute(text(constraint_sql))
+                            continue
+                        elif migration["action"] == "add_index":
+                            sql = f"CREATE INDEX idx_{table_name}_{migration['name']} ON {table_name} ({migration['columns']});"
+                        elif migration["action"] == "add_constraint":
+                            sql = f"ALTER TABLE {table_name} ADD CONSTRAINT {migration['name']} {migration['definition']};"
+                        connection.execute(text(sql))
                 return f"Table '{table_name}' successfully migrated."
         except SQLAlchemyError as e:
             return f"Error migrating table '{table_name}': {str(e)}"
 
+
+
     def retrieve_schema(self, table_name: str, db_url: str):
-        """
-        Retrieve comprehensive schema information using PostgreSQL system catalogs.
-        """
         try:
             schema_query = """
             SELECT 
@@ -102,10 +104,12 @@ class PostgresEngine:
             
             with self.engine.connect() as connection:
                 result = connection.execute(text(schema_query), {"table_name": table_name})
-                schema = [dict(row) for row in result]
+                schema = [dict(zip(result.keys(), row)) for row in result]
+                print(schema)
                 return schema if schema else f"Table '{table_name}' does not exist in the database."
         except SQLAlchemyError as e:
             return f"Error retrieving schema for table '{table_name}': {str(e)}"
+
 
     def define_workflow(self, workflow_name: str, table: str, triggers: list, db_url: str):
         """
@@ -136,57 +140,55 @@ class PostgresEngine:
             return f"Error defining workflow '{workflow_name}': {str(e)}"
 
     def define_form(self, form_name: str, operations: list):
-        """
-        Register a new form with PostgreSQL-specific features like RETURNING clause.
-        """
-        @app.route(f"/forms/{form_name}", methods=["POST"])
-        def form_endpoint():
-            try:
-                payload = request.json
-                results = []
-                with self.engine.connect() as connection:
+        async def form_endpoint(request: Request):
+            payload = await request.json()
+            results = []
+            with self.engine.connect() as connection:
+                with connection.begin():
                     for operation in operations:
                         table = operation["table"]
                         data = {key: payload[key] for key in operation["data"].keys() if key in payload}
                         columns = ", ".join(data.keys())
                         values = ", ".join([f":{k}" for k in data.keys()])
                         sql = f"""
-                        INSERT INTO {table} ({columns}) 
+                        INSERT INTO {table} ({columns})
                         VALUES ({values})
-                        RETURNING id, created_at;
+                        RETURNING id;
                         """
-                        result = connection.execute(text(sql), data)
-                        results.append({"table": table, "data": dict(result.first())})
-                return jsonify({"message": "Form processed successfully", "results": results}), 200
-            except Exception as e:
-                return jsonify({"error": str(e)}), 500
+                        # In postgres_engine.py, form_endpoint
+                        result = connection.execute(text(sql), data).mappings().first()
+                        results.append({"table": table, "data": dict(result)})
+
+
+            return {"message": "Form processed successfully", "results": results}
+
+        print(f"Registering form route: /forms/{form_name}")
+        app.router.add_api_route(f"/forms/{form_name}", form_endpoint, methods=["POST"])
+        print(f"Available routes after registration: {[route.path for route in app.routes]}")
         return f"Form '{form_name}' registered successfully."
 
+
     def define_reports(self, report_name: str, table: str, fields: list, filters: dict = None):
-        """
-        Register a new report with PostgreSQL-specific features like window functions.
-        """
-        @app.route(f"/reports/{report_name}", methods=["GET"])
-        def report_endpoint():
-            try:
-                fields_with_analytics = [
-                    *fields,
-                    "ROW_NUMBER() OVER (ORDER BY created_at) as row_num",
-                    "COUNT(*) OVER () as total_count"
-                ]
-                query = f"SELECT {', '.join(fields_with_analytics)} FROM {table}"
-                params = {}
-                if filters:
-                    conditions = []
-                    for key, value in filters.items():
-                        conditions.append(f"{key} = :{key}")
-                        params[key] = value
-                    query += " WHERE " + " AND ".join(conditions)
-                
-                with self.engine.connect() as connection:
-                    result = connection.execute(text(query), params)
+        async def report_endpoint():
+            fields_with_analytics = [
+                *fields,
+                "ROW_NUMBER() OVER (ORDER BY id) as row_num",
+                "COUNT(*) OVER () as total_count"
+            ]
+            query = f"SELECT {', '.join(fields_with_analytics)} FROM {table}"
+            params = {}
+            if filters:
+                conditions = []
+                for key, value in filters.items():
+                    conditions.append(f"{key} = :{key}")
+                    params[key] = value
+                query += " WHERE " + " AND ".join(conditions)
+            
+            with self.engine.connect() as connection:
+                with connection.begin():
+                    result = connection.execute(text(query), params).mappings().all()
                     data = [dict(row) for row in result]
-                return jsonify({"data": data}), 200
-            except Exception as e:
-                return jsonify({"error": str(e)}), 500
+            return {"data": data}
+
+        self.router.add_api_route(f"/reports/{report_name}", report_endpoint, methods=["GET"])
         return f"Report '{report_name}' registered successfully."

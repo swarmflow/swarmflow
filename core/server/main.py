@@ -1,31 +1,29 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-# from ..ai_engine import AIEngine
+import uvicorn
 
-# Create the FastAPI app
 app = FastAPI()
 
-# Define allowed origins for CORS
-origins = [
-    '*'
-]
 
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # List of allowed origins
-    allow_credentials=True,  # Allow cookies to be included in requests
-    allow_methods=["*"],  # Allow all HTTP methods
-    allow_headers=["*"],  # Allow all headers
+    allow_origins=['*'],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+# # Include the engine's router
+# app.include_router(engine.router)
+
+def create_app():
+    return app
 
 @app.get("/")
 async def health_check():
-    """
-    Health check endpoint to verify server status
-    """
     return {"message": "Server is running"}
+
 
 # Define an endpoint to stream AI assistant responses using SSE
 # @app.post("/ai-assistant/")
@@ -33,7 +31,8 @@ async def health_check():
 #     """
 #     SSE endpoint to stream results from the AI engine.
 #     """
-
+    # from ..postgres_engine.postgres_engine import PostgresEngine
+    # engine = PostgresEngine()
 #     async def event_generator():
 #         # Simulate streaming response from AIEngine
 #         try:
@@ -45,3 +44,7 @@ async def health_check():
 
 #     # Return the streaming response
 #     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
