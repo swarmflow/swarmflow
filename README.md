@@ -25,7 +25,7 @@ cd REPO_NAME
 
 ### Environment Setup
 
-1. Edit the `.env` file in the root directory:
+1. Copy  `.env.example` to `.env` and edit the `.env` file in the root directory:
 ```bash
 # Development environment
 POSTGRES_USER=dev_user

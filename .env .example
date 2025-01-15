@@ -3,4 +3,6 @@ POSTGRES_PASSWORD=test_password
 POSTGRES_DB=test_db
 POSTGRES_HOST=test_postgres
 POSTGRES_PORT=5432
-OPEN_AI_KEY=
+OPEN_AI_KEY={{your key here}}
+REDIS_HOST=test_redis
+REDIS_PORT=6379
