@@ -145,41 +145,160 @@ async def test_define_report():
     assert response.json()["data"][0]["name"] == "Test User"
 
 
-# @pytest.mark.asyncio
-# async def test_define_and_migrate_entity():
-#     """
-#     Test defining a table and applying migrations in sequence.
-#     """
-#     # Step 1: Define the table
-#     table_name = "orders"
-#     columns = {
-#         "id": "SERIAL PRIMARY KEY",
-#         "user_id": "INTEGER NOT NULL",
-#         "amount": "NUMERIC(10, 2) NOT NULL",
-#         "status": "TEXT DEFAULT 'pending'",
-#         "created_at": "TIMESTAMP DEFAULT NOW()"
-#     }
-#     define_result = engine.define_entity(table_name, columns, engine.config.postgres_url)
-#     assert define_result == f"Table '{table_name}' successfully defined on Supabase"
+@pytest.mark.asyncio
+async def test_define_and_migrate_entity():
+    """
+    Test defining a table and applying migrations in sequence.
+    """
+    # Step 1: Define the table
+    table_name = "orders"
+    columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "user_id": "INTEGER NOT NULL",
+        "amount": "NUMERIC(10, 2) NOT NULL",
+        "status": "TEXT DEFAULT 'pending'",
+    }
+    define_result = engine.define_entity(table_name, columns, engine.config.postgres_url)
+    assert define_result == f"Table '{table_name}' successfully defined with timestamps and triggers."
 
-#     # Step 2: Apply migrations
-#     migrations = [
-#         {"action": "add_column", "name": "shipped_at", "definition": "TIMESTAMP"},
-#         {"action": "modify_column", "name": "status", "definition": "TEXT NOT NULL"}
-#     ]
-#     migrate_result = engine.migrate_entity(table_name, migrations, engine.config.postgres_url)
-#     assert migrate_result == f"Table '{table_name}' successfully migrated."
+    # Step 2: Apply migrations
+    migrations = [
+        {"action": "add_column", "name": "shipped_at", "definition": "TIMESTAMP"},
+        {"action": "modify_column", "name": "status", "definition": "TEXT NOT NULL"}
+    ]
+    migrate_result = engine.migrate_entity(table_name, migrations, engine.config.postgres_url)
+    assert migrate_result == f"Table '{table_name}' successfully migrated."
 
-#     # Step 3: Verify schema after migrations
-#     schema = engine.retrieve_schema(table_name, engine.config.postgres_url)
-#     assert isinstance(schema, list)
+    # Step 3: Verify schema after migrations
+    schema = engine.retrieve_schema(table_name, engine.config.postgres_url)
+    assert isinstance(schema, list)
 
-#     # Check the new column was added
-#     shipped_at_column = next((col for col in schema if col["column_name"] == "shipped_at"), None)
-#     assert shipped_at_column is not None
-#     assert shipped_at_column["data_type"] == "timestamp without time zone"
+    # Check the new column was added
+    shipped_at_column = next((col for col in schema if col["column_name"] == "shipped_at"), None)
+    assert shipped_at_column is not None
+    assert shipped_at_column["data_type"] == "timestamp without time zone"
 
-#     # Check that the modified column has the correct constraints
-#     status_column = next((col for col in schema if col["column_name"] == "status"), None)
-#     assert status_column is not None
-#     assert status_column["is_nullable"] == "NO"
+    # Check that the modified column has the correct constraints
+    status_column = next((col for col in schema if col["column_name"] == "status"), None)
+    assert status_column is not None
+    assert status_column["is_nullable"] == "NO"
+
+@pytest.mark.asyncio
+async def test_define_workflow():
+    with engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+    
+    table_name = "orders"
+    columns = {"id": "SERIAL PRIMARY KEY","user_id": "INTEGER NOT NULL","amount": "NUMERIC(10, 2) NOT NULL","status": "TEXT DEFAULT 'pending'","total_with_tax": "NUMERIC(10, 2)"}
+    engine.define_entity(table_name, columns, engine.config.postgres_url)
+    
+    workflow_name = "order_processing"
+    triggers = [{"name": "calculate_tax","timing": "BEFORE","event": "INSERT","logic": "BEGIN NEW.total_with_tax := NEW.amount * 1.2; RETURN NEW; END;","condition": "TRUE"}]
+    engine.define_workflow(workflow_name, table_name, triggers, engine.config.postgres_url)
+    
+    with engine.engine.connect() as connection:
+        with connection.begin():
+            result = connection.execute(text("INSERT INTO orders (user_id, amount) VALUES (1, 100.00) RETURNING user_id, amount, total_with_tax;")).mappings().first()
+            assert result['amount'] == 100.00
+            assert result['total_with_tax'] == 120.00
+
+@pytest.mark.asyncio
+async def test_complex_workflow():
+    """
+    Test defining a complex workflow across multiple related tables
+    """
+    with engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS inventory CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS order_history CASCADE;"))
+    
+    # Define tables
+    tables = {
+        "orders": {
+            "id": "SERIAL PRIMARY KEY",
+            "product_id": "INTEGER NOT NULL",
+            "quantity": "INTEGER NOT NULL",
+            "status": "TEXT DEFAULT 'pending'",
+            "total_price": "NUMERIC(10, 2)"
+        },
+        "inventory": {
+            "id": "SERIAL PRIMARY KEY",
+            "product_id": "INTEGER NOT NULL",
+            "quantity": "INTEGER NOT NULL",
+            "last_updated": "TIMESTAMP"
+        },
+        "order_history": {
+            "id": "SERIAL PRIMARY KEY",
+            "order_id": "INTEGER NOT NULL",
+            "status": "TEXT NOT NULL",
+            "timestamp": "TIMESTAMP"
+        }
+    }
+    
+    for table_name, columns in tables.items():
+        engine.define_entity(table_name, columns, engine.config.postgres_url)
+    
+    # Define complex workflow
+    workflow_name = "order_processing"
+    triggers = [
+        {
+            "name": "update_inventory",
+            "timing": "AFTER",
+            "event": "INSERT",
+            "logic": """
+                BEGIN
+                    UPDATE inventory 
+                    SET quantity = quantity - NEW.quantity,
+                        last_updated = CURRENT_TIMESTAMP
+                    WHERE product_id = NEW.product_id;
+                    RETURN NEW;
+                END;
+            """,
+            "condition": "NEW.status = 'pending'"
+        },
+        {
+            "name": "create_history",
+            "timing": "AFTER",
+            "event": "INSERT OR UPDATE",
+            "logic": """
+                BEGIN
+                    INSERT INTO order_history (order_id, status, timestamp)
+                    VALUES (NEW.id, NEW.status, CURRENT_TIMESTAMP);
+                    RETURN NEW;
+                END;
+            """,
+            "condition": "TRUE"
+        }
+    ]
+    
+    engine.define_workflow(workflow_name, "orders", triggers, engine.config.postgres_url)
+    
+    # Test the workflow
+    with engine.engine.connect() as connection:
+        with connection.begin():
+            # Setup initial inventory
+            connection.execute(text("""
+                INSERT INTO inventory (product_id, quantity)
+                VALUES (1, 100);
+            """))
+            
+            # Create order
+            connection.execute(text("""
+                INSERT INTO orders (product_id, quantity, status)
+                VALUES (1, 5, 'pending');
+            """))
+            
+            # Verify inventory updated
+            inventory_result = connection.execute(text("""
+                SELECT quantity FROM inventory WHERE product_id = 1;
+            """)).mappings().first()
+            assert inventory_result['quantity'] == 95
+            
+            # Verify order history created
+            history_result = connection.execute(text("""
+                SELECT COUNT(*) as count FROM order_history;
+            """)).mappings().first()
+            assert history_result['count'] == 1
+

@@ -6,6 +6,7 @@ class Config:
     '''
     def __init__(self):
         load_dotenv()
+        self.OPEN_AI_KEY = os.getenv('OPEN_AI_KEY')
         POSTGRES_USER = os.getenv('POSTGRES_USER')
         POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD')
         POSTGRES_HOST = os.getenv('POSTGRES_HOST')

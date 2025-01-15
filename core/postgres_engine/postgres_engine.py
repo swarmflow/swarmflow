@@ -112,30 +112,17 @@ class PostgresEngine:
 
 
     def define_workflow(self, workflow_name: str, table: str, triggers: list, db_url: str):
-        """
-        Define advanced PostgreSQL triggers with full procedural capabilities.
-        """
         try:
             with self.engine.connect() as connection:
-                for trigger in triggers:
-                    function_sql = f"""
-                    CREATE OR REPLACE FUNCTION {workflow_name}_{trigger['name']}_fn()
-                    RETURNS TRIGGER AS $$
-                    BEGIN
-                        {trigger['logic']}
-                        RETURN NEW;
-                    END;
-                    $$ LANGUAGE plpgsql;
-                    
-                    DROP TRIGGER IF EXISTS {trigger['name']} ON {table};
-                    CREATE TRIGGER {trigger['name']}
-                    {trigger['timing']} {trigger['event']} ON {table}
-                    FOR EACH ROW
-                    WHEN ({trigger.get('condition', 'TRUE')})
-                    EXECUTE FUNCTION {workflow_name}_{trigger['name']}_fn();
-                    """
-                    connection.execute(text(function_sql))
-                return f"Workflow '{workflow_name}' defined successfully with triggers."
+                with connection.begin():
+                    for trigger in triggers:
+                        function_name = f"{workflow_name}_{trigger['name']}_fn"
+                        function_sql = f"CREATE OR REPLACE FUNCTION {function_name}() RETURNS TRIGGER AS $$ {trigger['logic']} $$ LANGUAGE plpgsql;"
+                        connection.execute(text(function_sql))
+                        trigger_name = f"{workflow_name}_{trigger['name']}"
+                        trigger_sql = f"DROP TRIGGER IF EXISTS {trigger_name} ON {table}; CREATE TRIGGER {trigger_name} {trigger['timing']} {trigger['event']} ON {table} FOR EACH ROW EXECUTE FUNCTION {function_name}();"
+                        connection.execute(text(trigger_sql))
+                    return f"Workflow '{workflow_name}' defined successfully with triggers."
         except SQLAlchemyError as e:
             return f"Error defining workflow '{workflow_name}': {str(e)}"
 

@@ -1,0 +1,234 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "define_entity",
+            "description": "Creates a new table in the database with required fields and timestamps",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to create"
+                    },
+                    "columns": {
+                        "type": "object",
+                        "description": "Column definitions using PostgreSQL types",
+                        "additionalProperties": {
+                            "type": "string"
+                        }
+                    },
+                    "db_url": {
+                        "type": "string",
+                        "description": "Database connection URL"
+                    }
+                },
+                "required": ["table_name", "columns", "db_url"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "retrieve_schema",
+            "description": "Gets the current schema of a table including columns, types, and constraints",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to inspect"
+                    },
+                    "db_url": {
+                        "type": "string",
+                        "description": "Database connection URL"
+                    }
+                },
+                "required": ["table_name", "db_url"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "migrate_entity",
+            "description": "Modifies an existing table structure with new columns, indexes or constraints",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table_name": {
+                        "type": "string",
+                        "description": "Name of the table to modify"
+                    },
+                    "migrations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["add_column", "drop_column", "modify_column", "add_index", "add_constraint"]
+                                },
+                                "name": {
+                                    "type": "string",
+                                    "description": "Name of column/index/constraint"
+                                },
+                                "definition": {
+                                    "type": "string",
+                                    "description": "PostgreSQL type definition or constraint definition"
+                                }
+                            },
+                            "required": ["action", "name", "definition"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "db_url": {
+                        "type": "string",
+                        "description": "Database connection URL"
+                    }
+                },
+                "required": ["table_name", "migrations", "db_url"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "define_form",
+            "description": "Creates an API endpoint for data input operations with transaction support",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "form_name": {
+                        "type": "string",
+                        "description": "Name of the form endpoint"
+                    },
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "table": {
+                                    "type": "string",
+                                    "description": "Table to insert/update data"
+                                },
+                                "data": {
+                                    "type": "object",
+                                    "description": "Fields to include in the form",
+                                    "additionalProperties": {
+                                        "type": "null"
+                                    }
+                                }
+                            },
+                            "required": ["table", "data"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["form_name", "operations"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "define_reports",
+            "description": "Creates an API endpoint for data retrieval with filtering and aggregation",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "report_name": {
+                        "type": "string",
+                        "description": "Name of the report endpoint"
+                    },
+                    "table": {
+                        "type": "string",
+                        "description": "Table to query data from"
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Fields to include in the report"
+                    },
+                    "filters": {
+                        "type": "object",
+                        "description": "Optional filtering conditions",
+                        "additionalProperties": true
+                    }
+                },
+                "required": ["report_name", "table", "fields"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "define_workflow",
+            "description": "Creates database triggers for automating task progression and data processing",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workflow_name": {
+                        "type": "string",
+                        "description": "Name of the workflow"
+                    },
+                    "table": {
+                        "type": "string",
+                        "description": "Table to attach triggers to"
+                    },
+                    "triggers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Name of the trigger"
+                                },
+                                "timing": {
+                                    "type": "string",
+                                    "enum": ["BEFORE", "AFTER"],
+                                    "description": "When to execute the trigger"
+                                },
+                                "event": {
+                                    "type": "string",
+                                    "enum": ["INSERT", "UPDATE", "DELETE", "INSERT OR UPDATE", "INSERT OR DELETE", "UPDATE OR DELETE", "INSERT OR UPDATE OR DELETE"],
+                                    "description": "Database events that activate the trigger"
+                                },
+                                "logic": {
+                                    "type": "string",
+                                    "description": "PL/pgSQL trigger function body"
+                                },
+                                "condition": {
+                                    "type": "string",
+                                    "description": "Optional condition for trigger execution"
+                                }
+                            },
+                            "required": ["name", "timing", "event", "logic"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "db_url": {
+                        "type": "string",
+                        "description": "Database connection URL"
+                    }
+                },
+                "required": ["workflow_name", "table", "triggers", "db_url"],
+                "additionalProperties": false
+            },
+            "strict": true
+        }
+    }
+]
