@@ -3,10 +3,6 @@
 Goal: To provide a general working guideline of how this prroject will be designed and developed. If you are a contributor, please follow this guideline. And ask in the Discord if you have any questions.
 
 ## Definitions
-### Admin UI
-A basic chatbot that sends commands to the CEO agent and displays the results in a sideview.
-
-Here's a link to the UI Design on [figma](https://www.figma.com/design/VVl8IncPD55ZAiSxOUpQpw/Untitled?node-id=0-1&t=RpbAfxyAiq57S7Az-1)
 
 ### CEO Agent
 An LLM agent that is responsible for querying the database and modifying the database and middleware.
