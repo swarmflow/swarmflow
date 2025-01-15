@@ -34,11 +34,11 @@ The LLM proccesses that make up the swarm and can execute tasks.
 ### Swarm Design (for prototype)
 - Python Middleware (see /core)
 - Postgres
-- Admin UI (vue+vite) (see /admin)
+- Admin interface to interact with AI CEO
 - Redis for task queue
 - Agent Server (see /worker_agent)
 ## Deployment
-- Testing: run docker compose on testing .yml
+- Testing: run `docker compose -f docker_compose.test.yml up --build`
 - Local Hosting: run docker compose in root
 - Cloud Hosting: TBD
 
