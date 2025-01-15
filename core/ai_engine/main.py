@@ -4,13 +4,15 @@ from openai import OpenAI, AsyncOpenAI
 import json
 from sse_starlette.sse import EventSourceResponse
 import os
+
 class AIEngine:
     '''
     An AI engine to run the AI Architect and Deploy AI Agents.
     '''
     def __init__(self):
         self.oai_api_key = Config().OPEN_AI_KEY
-        self.create_workflow_assistant()
+        self.assistant = self.create_workflow_assistant()
+        self.pg_engine = PostgresEngine()
 
     def create_workflow_assistant(self):
         # Initialize the OpenAI client
@@ -36,7 +38,7 @@ class AIEngine:
         
         if existing_assistant:
             print(f"Assistant already exists with ID: {existing_assistant.id}")
-            return existing_assistant
+            return existing_assistant.id
         
         # Create new assistant if it doesn't exist
         assistant = client.beta.assistants.create(
@@ -48,10 +50,10 @@ class AIEngine:
         )
         
         print(f"Created new assistant with ID: {assistant.id}")
-        return assistant
+        return assistant.id
 
     
-    def Architect(self):
+    def call_architect(self, msg):
         '''
         Architect to Configure Supabase and Generate PKL Files.
         '''
@@ -64,7 +66,7 @@ class AIEngine:
         async_client = AsyncOpenAI(api_key=self.oai_api_key)
         memory = StreamMemory()
         thread = client.beta.threads.create()
-        async def handle_stream(session, stream, memory):
+        async def handle_stream(stream, memory):
             query = ""
             id = ""
             name = ""
@@ -99,7 +101,7 @@ class AIEngine:
                                         else:
                                             print("Unknown tool call:", name)
                                         stream_tools = async_client.beta.threads.runs.submit_tool_outputs_stream(
-                                            thread_id= session.thread_id,
+                                            thread_id= thread.thread_id,
                                             run_id= stream.current_run.id,
                                             tool_outputs=[
                                                 {
@@ -110,7 +112,7 @@ class AIEngine:
                                     except Exception as e:
                                         print("Error:", e)
                                         stream_tools = async_client.beta.threads.runs.submit_tool_outputs_stream(
-                                            thread_id= session.thread_id,
+                                            thread_id= thread.thread_id,
                                             run_id= stream.current_run.id,
                                             tool_outputs=[
                                                 {
@@ -119,40 +121,22 @@ class AIEngine:
                                                 }
                                             ])
                                     async with stream_tools as st:
-                                        async for event in handle_stream(session, st,memory):
+                                        async for event in handle_stream(st,memory):
                                             yield event
         async def event_generator():
 
             client.beta.threads.messages.create(
-                thread_id=session.thread_id,
+                thread_id=thread.thread_id,
                 role="user",
-                content=message
+                content=msg
             )
-            user = db.query(User).filter(User.id == user_id).first()
-            client.beta.threads.messages.create(
-                thread_id=session.thread_id,
-                role="assistant",
-                content= "This is current user context:\n"+str(user.__dict__)
-            )
-
-            # class ChatEventHandler(AssistantEventHandler):    
-            #     @override
-            #     def on_text_created(self, text) -> None:
-            #         return
-                    
-            #     @override
-            #     def on_text_delta(self, delta, snapshot):
-            #         yield {
-            #             "event": "content",
-            #             "data": json.dumps({"content": delta.value})
-            #         }
 
             async with async_client.beta.threads.runs.stream(
                 thread_id=thread.id,
-                assistant_id="asst_dgpcaoVkRGYd6i6qHQD08rih",
+                assistant_id=self.assistant,
                 # event_handler=ChatEventHandler()
             ) as stream:
-                async for event in handle_stream(session,stream,memory):
+                async for event in handle_stream(stream,memory):
                     yield event
                 # async for text in stream.text_deltas:
                 #     yield f"data: {text}\n\n"

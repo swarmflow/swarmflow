@@ -181,4 +181,8 @@ docker compose exec api alembic upgrade head
 
 ## License
 
-MIT
+This project is available under a dual license:
+- Elastic License 2.0 (ELv2) for organizations with < $10k annual revenue
+- Commercial license for organizations with ≥ $10k annual revenue (contact rishabhsingh@berkeley.edu)
+
+See [LICENSE](LICENSE) for details.
