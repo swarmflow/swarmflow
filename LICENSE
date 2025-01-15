@@ -1,0 +1,38 @@
+# Dual License
+
+This software is provided under a dual license model:
+
+## 1. Elastic License 2.0 (ELv2) (see License+/EL_LICENSE)
+If your organization generates less than $10,000 USD in annual revenue, you may use this software under the Elastic License 2.0. See the full ELv2 terms below.
+
+```
+Elastic License 2.0
+
+Parameters:
+- Licensor: Rishabh Singh
+- Source Code URL: [GitHub Repository URL]
+
+Use Limitations:
+You may not provide the software to third parties as a hosted or managed
+service, where the service provides users with access to any substantial set of
+the features or functionality of the software.
+
+You may not move, change, disable, or circumvent the license key functionality
+in the software, and you may not remove or obscure any functionality in the
+software that is protected by the license key.
+
+You may not alter, remove, or obscure any licensing, copyright, or other notices
+of the licensor in the software. Any use of the licensor's trademarks is subject
+to applicable law.
+
+For full terms, see: https://www.elastic.co/licensing/elastic-license
+```
+
+## 2. Commercial License
+If your organization generates $10,000 USD or more in annual revenue, you must obtain a commercial license to use this software.
+
+Please contact rishabhsingh@berkeley.edu to obtain a commercial license.
+
+---
+
+Copyright (c) 2024 Rishabh Singh

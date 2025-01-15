@@ -1,3 +1,9 @@
+"""
+Copyright (c) 2025 Swarmflow
+Licensed under Elastic License 2.0 or Commercial License
+See LICENSE file for details
+"""
+
 from ..postgres_engine.postgres_engine import PostgresEngine
 from ..config import Config
 from openai import OpenAI, AsyncOpenAI

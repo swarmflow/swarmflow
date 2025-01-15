@@ -1,9 +1,19 @@
+"""
+Copyright (c) 2025 Swarmflow
+Licensed under Elastic License 2.0 or Commercial License
+See LICENSE file for details
+"""
+
 import pytest
 from httpx import AsyncClient
+import httpx
 from core.server.main import app
 from core.postgres_engine.postgres_engine import PostgresEngine
+from core.redis_engine.redis_engine import RedisEngine
+from core.schemas.schemas import SwarmTask
 import uvicorn
 import threading
+import asyncio
 from sqlalchemy import text
 
 
@@ -302,3 +312,135 @@ async def test_complex_workflow():
             """)).mappings().first()
             assert history_result['count'] == 1
 
+@pytest.mark.asyncio
+async def test_redis_task_queue():
+    """
+    Test Redis task queue operations
+    """
+    from core.redis_engine.redis_engine import RedisEngine
+    from core.redis_engine.redis_engine import SwarmTask
+    
+    # Initialize Redis Engine
+    redis_engine = RedisEngine()
+    
+    # Create a test task
+    test_task = SwarmTask(
+        description="Analyze sentiment of customer review",
+        callback_url="https://api.example.com/callback",
+        fields={
+            "review_text": "The text content of the review",
+            "language": "The language code of the review"
+        }
+    )
+    
+    # Test adding task
+    add_result = redis_engine.add_task(test_task)
+    assert isinstance(add_result, int)
+    assert add_result > 0
+    
+    # Test retrieving task
+    retrieved_task = redis_engine.get_task()
+    assert isinstance(retrieved_task, SwarmTask)
+    assert retrieved_task.description == test_task.description
+    assert retrieved_task.callback_url == test_task.callback_url
+    assert retrieved_task.fields == test_task.fields
+
+@pytest.mark.asyncio
+async def test_redis_task_validation():
+    """
+    Test Redis task validation
+    """
+    from core.redis_engine.redis_engine import RedisEngine
+    from pydantic import ValidationError
+    
+    redis_engine = RedisEngine()
+    
+    # Test invalid task (missing required fields)
+    invalid_task = {
+        "description": "Invalid task"
+        # missing callback_url and fields
+    }
+    
+    with pytest.raises((ValidationError, Exception)):
+        redis_engine.add_task(invalid_task)
+    
+    # Test invalid URL format
+    invalid_url_task = {
+        "description": "Task with invalid URL",
+        "callback_url": "not-a-valid-url",
+        "fields": {"test": "test description"}
+    }
+    
+    with pytest.raises((ValidationError, Exception)):
+        redis_engine.add_task(invalid_url_task)
+
+
+@pytest.mark.asyncio
+async def test_order_processing_with_ai():
+    """Test order processing with AI field generation"""
+    print("\nStarting order processing test with AI generation...")
+    redis_engine = RedisEngine()
+    postgres_engine = PostgresEngine()
+
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            print("Cleaning up existing orders table...")
+            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+
+    # Setup table and form as before
+    table_name = "orders"
+    columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "product_name": "VARCHAR(255) NOT NULL",
+        "quantity": "INTEGER NOT NULL",
+        "total_price": "NUMERIC(10,2) NOT NULL"
+    }
+    
+    postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
+
+    form_name = "create_order"
+    operations = [
+        {"table": "orders", "data": {
+            "product_name": "VARCHAR(255)",
+            "quantity": "INTEGER",
+            "total_price": "NUMERIC(10,2)"
+        }}
+    ]
+    
+    postgres_engine.define_form(form_name, operations)
+
+    # Create task with empty fields
+    test_task = SwarmTask(
+        description="Fill out this new order form object with random data",
+        callback_url="http://test_app:8000/forms/create_order",
+        fields={
+            "product_name": None,
+            "quantity": None,
+            "total_price": None
+        }
+    )
+    redis_engine.add_task(test_task)
+
+    async with httpx.AsyncClient() as client:
+        # Initial checks
+        response = await client.get("http://worker_agent:8002/status")
+        initial_queue_size = response.json()["queue_size"]
+        assert initial_queue_size > 0
+
+        # Wait for AI processing
+        await asyncio.sleep(5)  # Longer wait for AI processing
+
+        # Verify completion
+        finished_count = redis_engine.redis_client.llen("finished")
+        assert finished_count > 0, "Task should be marked as finished"
+
+        # Verify order creation with AI-generated values
+        with postgres_engine.engine.connect() as connection:
+            result = connection.execute(text("SELECT * FROM orders")).fetchone()
+            assert result is not None
+            print(f"AI-generated order: {result._asdict()}")
+            
+            # Verify generated values match expected types
+            assert isinstance(result.product_name, str)
+            assert isinstance(result.quantity, int)
+            assert isinstance(float(result.total_price), float)

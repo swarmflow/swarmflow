@@ -9,3 +9,6 @@ httpx
 python-dotenv
 pytest-asyncio
 pytest-anyio
+pydantic
+redis
+openai
