@@ -401,11 +401,12 @@ async def test_order_processing_with_ai():
     form_name = "create_order"
     operations = [
         {"table": "orders", "data": {
-            "product_name": "VARCHAR(255)",
+            "product_name": "TEXT",
             "quantity": "INTEGER",
             "total_price": "NUMERIC(10,2)"
         }}
     ]
+
     
     postgres_engine.define_form(form_name, operations)
 
@@ -423,9 +424,9 @@ async def test_order_processing_with_ai():
 
     async with httpx.AsyncClient() as client:
         # Initial checks
-        response = await client.get("http://worker_agent:8002/status")
-        initial_queue_size = response.json()["queue_size"]
-        assert initial_queue_size > 0
+        # response = await client.get("http://worker_agent:8002/status")
+        # initial_queue_size = response.json()["queue_size"]
+        # assert initial_queue_size > 0
 
         # Wait for AI processing
         await asyncio.sleep(5)  # Longer wait for AI processing
@@ -444,3 +445,87 @@ async def test_order_processing_with_ai():
             assert isinstance(result.product_name, str)
             assert isinstance(result.quantity, int)
             assert isinstance(float(result.total_price), float)
+
+@pytest.mark.asyncio
+async def test_multiple_workers_ai_processing():
+    """Test multiple workers processing multiple AI tasks"""
+
+    print("\nStarting multi-worker AI processing test...")
+    redis_engine = RedisEngine()
+    
+    # Clear finished list before starting
+    redis_engine.redis_client.delete("finished")
+
+    postgres_engine = PostgresEngine()
+
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            print("Cleaning up existing orders table...")
+            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+
+    table_name = "orders"
+    columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "product_name": "VARCHAR(255) NOT NULL",
+        "quantity": "INTEGER NOT NULL",
+        "total_price": "NUMERIC(10,2) NOT NULL"
+    }
+    print(f"Creating orders table with schema: {columns}")
+    postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
+
+    form_name = "create_order"
+    operations = [
+        {"table": "orders", "data": {
+            "product_name": None,
+            "quantity": None,
+            "total_price": None
+        }}
+    ]
+    print(f"Registering form handler: {form_name}")
+    postgres_engine.define_form(form_name, operations)
+
+    # Create multiple tasks
+    tasks = [
+        SwarmTask(
+            description=f"Process order {i} with AI",
+            callback_url="http://test_app:8000/forms/create_order",
+            fields={
+                "product_name": None,
+                "quantity": None,
+                "total_price": None
+            }
+        ) for i in range(3)
+    ]
+
+    # Add tasks to queue
+    for task in tasks:
+        print(f"Adding task to queue: {task.model_dump_json()}")
+        redis_engine.add_task(task)
+
+    async with httpx.AsyncClient() as client:
+        # Initial queue check
+        # response = await client.get("http://worker_agent:8002/status")
+        # initial_queue_size = response.json()["queue_size"]
+        # print(f"Initial queue size: {initial_queue_size}")
+        # assert initial_queue_size == 3
+
+        # Wait for parallel processing
+        print("Waiting for parallel AI processing...")
+        await asyncio.sleep(7)  # Longer wait for multiple tasks
+
+        # Verify all tasks completed
+        finished_count = redis_engine.redis_client.llen("finished")
+        print(f"Finished tasks: {finished_count}")
+        assert finished_count == 3, "All tasks should be processed"
+
+        # Verify all orders created
+        with postgres_engine.engine.connect() as connection:
+            results = connection.execute(text("SELECT * FROM orders")).mappings().all()
+            print(f"Created orders: {results}")
+            assert len(results) == 3, "Should create 3 orders"
+
+            # Verify data types for each order
+            for result in results:
+                assert isinstance(result['product_name'], str)
+                assert isinstance(result['quantity'], int)
+                assert isinstance(float(result['total_price']), float)

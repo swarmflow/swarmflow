@@ -70,8 +70,10 @@ services:
     build:
       context: .
       dockerfile: worker_agent/Dockerfile
+    deploy:
+      replicas: 3
     ports:
-      - "8002:8002"
+      - "8002"
     depends_on:
       test_redis:
         condition: service_healthy
