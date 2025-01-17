@@ -23,7 +23,8 @@ services:
     command: >
       sh -c "
         cd /app &&
-        pytest core/tests/test.py -v
+        pytest core/tests/test.py -v &&
+        pytest core/tests/test_redis.py -v
       "
     networks:
       - test-network
@@ -35,7 +36,9 @@ services:
       start_period: 5s
 
   test_postgres:
-    image: postgres:latest
+    build:
+      context: .
+      dockerfile: postgres/Dockerfile
     container_name: test_postgres_db
     ports:
       - "5433:5432"

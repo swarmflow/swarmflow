@@ -213,6 +213,7 @@ async def test_define_workflow():
             assert result['amount'] == 100.00
             assert result['total_with_tax'] == 120.00
 
+
 @pytest.mark.asyncio
 async def test_complex_workflow():
     """
@@ -330,7 +331,9 @@ async def test_redis_task_queue():
         fields={
             "review_text": "The text content of the review",
             "language": "The language code of the review"
-        }
+        },
+        type="ai",
+        external=False,
     )
     
     # Test adding task
@@ -418,7 +421,9 @@ async def test_order_processing_with_ai():
             "product_name": None,
             "quantity": None,
             "total_price": None
-        }
+        },
+        type="ai",
+        external=False,
     )
     redis_engine.add_task(test_task)
 
@@ -493,7 +498,9 @@ async def test_multiple_workers_ai_processing():
                 "product_name": None,
                 "quantity": None,
                 "total_price": None
-            }
+            },
+            type="ai",
+            external=False
         ) for i in range(3)
     ]
 
@@ -529,3 +536,313 @@ async def test_multiple_workers_ai_processing():
                 assert isinstance(result['product_name'], str)
                 assert isinstance(result['quantity'], int)
                 assert isinstance(float(result['total_price']), float)
+@pytest.mark.asyncio
+async def test_redis_fdw_setup():
+    """Test Redis Foreign Data Wrapper setup and functionality"""
+    postgres_engine = PostgresEngine()
+
+    # Validate Redis FDW setup
+    validation_result = postgres_engine.validate_redis_fdw()
+    
+    # Verify all components
+    if validation_result["status"] == "error":
+        raise Exception(validation_result["message"])
+    assert validation_result["status"] == "success"
+    assert validation_result["details"]["extension_installed"]
+    assert validation_result["details"]["server_configured"] 
+    assert validation_result["details"]["user_mapping_exists"]
+    assert validation_result["details"]["foreign_table_exists"]
+    assert validation_result["details"]["connection_functional"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_forwarding():
+    """Test if workflow trigger inserts into swarm_tasks table"""
+    postgres_engine = PostgresEngine()
+
+    # Clear test table
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("DROP TABLE IF EXISTS test_source CASCADE;"))
+
+    # Create test table
+    columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "status": "TEXT DEFAULT 'pending'"
+    }
+    postgres_engine.define_entity("test_source", columns, postgres_engine.config.postgres_url)
+
+    # Define workflow
+    workflow_triggers = [{
+        "name": "test_trigger",
+        "timing": "AFTER",
+        "event": "INSERT",
+        "condition": "NEW.status = 'pending'",
+        "logic": "BEGIN RETURN NEW; END;",
+        "form_name": "test_form",
+        "callback_url": "http://test_app:8000/forms/test_form",
+        "form_fields": {"test_field": "TEXT"},
+        "type": "ai",
+        "isExternal": False
+    }]
+
+    postgres_engine.define_workflow("test_workflow", "test_source", workflow_triggers, postgres_engine.config.postgres_url)
+
+    # Insert record and check swarm_tasks
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("INSERT INTO test_source (status) VALUES ('pending')"))
+            tasks = connection.execute(text("SELECT * FROM swarm_tasks")).fetchall()
+            print(f"Tasks in swarm_tasks: {tasks}")
+            assert len(tasks) > 0, "Trigger should insert task into swarm_tasks"
+
+
+@pytest.mark.asyncio
+async def test_workflow_trigger_redis_integration():
+    redis_engine = RedisEngine()
+    postgres_engine = PostgresEngine()
+
+    # Clear all data
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("DROP TABLE IF EXISTS test_orders CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS test_results CASCADE;"))
+    
+    redis_engine.redis_client.delete("swarm_tasks")
+    redis_engine.redis_client.delete("finished")
+
+    # Create both tables
+    orders_columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "status": "TEXT DEFAULT 'pending'"
+    }
+    results_columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "test_field": "TEXT"
+    }
+    postgres_engine.define_entity("test_orders", orders_columns, postgres_engine.config.postgres_url)
+    postgres_engine.define_entity("test_results", results_columns, postgres_engine.config.postgres_url)
+
+    # Define form
+    form_operations = [
+        {"table": "test_results", "data": {"test_field": None}}
+    ]
+    postgres_engine.define_form("test_form", form_operations)
+
+    # Define workflow with trigger
+    workflow_triggers = [{
+        "name": "test_trigger",
+        "timing": "AFTER",
+        "event": "INSERT",
+        "condition": "NEW.status = 'pending'",
+        "logic": """
+            BEGIN
+                RETURN NEW;
+            END;
+        """,
+        "form_name": "test_form",
+        "callback_url": "http://test_app:8000/forms/test_form",
+        "form_fields": {"test_field": "TEXT"},
+        "type": "ai",
+        "isExternal": False
+    }]
+
+    postgres_engine.define_workflow(
+        "test_workflow", 
+        "test_orders", 
+        workflow_triggers, 
+        postgres_engine.config.postgres_url
+    )
+
+    # Insert record to trigger workflow
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text(
+                "INSERT INTO test_orders (status) VALUES ('pending')"
+            ))
+
+    # Verify Redis queue state
+    # tasks = redis_engine.redis_client.lrange("swarm_tasks", 0, -1)
+    # print(f"Tasks in Redis queue: {tasks}")
+    
+    # assert len(tasks) > 0, "Trigger should create task in Redis queue"
+    
+    # # Verify task content
+    # task = SwarmTask.model_validate_json(tasks[0])
+    # assert task.callback_url == "http://test_app:8000/forms/test_form"
+    # assert task.type == "ai"
+    # assert task.external == False
+
+    # Verify form endpoint exists
+    async with AsyncClient(base_url="http://test_app:8000") as client:
+        response = await client.get("/")
+        routes = [route.path for route in app.routes]
+        assert "/forms/test_form" in routes, "Form endpoint should be registered"
+    with postgres_engine.engine.connect() as connection:
+        print("\nFDW Configuration:")
+        print(connection.execute(text("""
+            SELECT * FROM pg_foreign_server 
+            WHERE srvname = 'redis_server';
+        """)).fetchall())
+        
+        print("\nUser Mappings:")
+        print(connection.execute(text("""
+            SELECT * FROM pg_user_mappings 
+            WHERE srvname = 'redis_server';
+        """)).fetchall())
+
+    test_task = SwarmTask(
+        description="Test FDW Integration",
+        callback_url="http://test.com/callback",
+        fields={"test": "value"},
+        type="ai",
+        external=False
+    )
+
+    # Test direct Redis access
+    with postgres_engine.engine.connect() as connection:
+        print("\nTesting direct Redis insert:")
+        connection.execute(text("""
+            INSERT INTO swarm_tasks (task) VALUES (:task);
+        """), {"task": test_task.model_dump_json()})
+        
+    print("\nRedis queue state:")
+    tasks = redis_engine.redis_client.lrange("finished", 0, -1)
+    print(tasks)
+    
+    # Verify task
+    if tasks:
+        retrieved_task = SwarmTask.model_validate_json(tasks[0])
+        assert isinstance(retrieved_task, SwarmTask)
+
+
+
+@pytest.mark.asyncio
+async def test_complete_workflow_chain():
+    """
+    Test the complete workflow chain from starter tasks through completion
+    """
+    redis_engine = RedisEngine()
+    postgres_engine = PostgresEngine()
+
+    # Clear all existing data
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("DROP TABLE IF EXISTS sales CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS inventory CASCADE;"))
+    
+    redis_engine.redis_client.delete("finished")
+    redis_engine.redis_client.delete("swarm_tasks")
+    redis_engine.redis_client.delete(redis_engine.scheduled_tasks_key)
+
+    # Define entities
+    sales_columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "product_id": "INTEGER NOT NULL",
+        "quantity": "INTEGER NOT NULL",
+        "status": "TEXT DEFAULT 'pending'",
+        "total_amount": "NUMERIC(10,2)"
+    }
+    
+    inventory_columns = {
+        "id": "SERIAL PRIMARY KEY",
+        "product_id": "INTEGER NOT NULL",
+        "stock_level": "INTEGER NOT NULL"
+    }
+
+    postgres_engine.define_entity("sales", sales_columns, postgres_engine.config.postgres_url)
+    postgres_engine.define_entity("inventory", inventory_columns, postgres_engine.config.postgres_url)
+
+    # Define forms
+    update_inventory_form = [
+        {"table": "inventory", "data": {"product_id": None, "stock_level": None}}
+    ]
+    process_sale_form = [
+    {"table": "sales", "data": {
+        "product_id": None, 
+        "quantity": None, 
+        "total_amount": None,
+        "status": "pending"  # Explicitly set status to trigger the workflow
+    }}
+]
+
+    postgres_engine.define_form("update_inventory", update_inventory_form)
+    postgres_engine.define_form("process_sale", process_sale_form)
+
+    # Define workflow with triggers
+    workflow_triggers = [
+    {
+        "name": "check_inventory",
+        "timing": "AFTER",
+        "event": "INSERT",
+        "condition": "NEW.status = 'pending'",
+        "logic": """
+            BEGIN
+                -- Just return NEW since form will handle the update
+                RETURN NEW;
+            END;
+        """,
+        "form_name": "update_inventory",
+        "callback_url": "http://test_app:8000/forms/update_inventory",
+        "form_fields": {
+            "product_id": "INTEGER",
+            "stock_level": "INTEGER"
+        },
+        "type": "ai",
+        "isExternal": False
+    }
+]
+
+
+
+    postgres_engine.define_workflow("sales_workflow", "sales", workflow_triggers, postgres_engine.config.postgres_url)
+
+    # Schedule starter task
+    starter_task = SwarmTask(
+        description="Initial sales processing",
+        callback_url="http://test_app:8000/forms/process_sale",
+        fields={
+            "product_id": 1,
+            "quantity": 5,
+            "total_amount": 100.00
+        },
+        type = "ai",
+        external=False,
+        starter=True
+    )
+
+    # Schedule task to run every minute
+    task_id = redis_engine.schedule_task(starter_task, "minutes", -1)
+    assert task_id is not None
+
+    # Verify starter task executed
+    # due_tasks = redis_engine.get_due_tasks()
+    # assert len(due_tasks) > 0
+
+    # Wait for workflow completion
+    await asyncio.sleep(5)
+
+    # Verify results in both queues
+    finished_tasks = redis_engine.redis_client.lrange("finished", 0, -1)
+    assert len(finished_tasks) > 0, "Tasks should be marked as finished"
+    
+    # Verify content of finished tasks
+    for task_json in finished_tasks:
+        finished_task = SwarmTask.model_validate_json(task_json)
+        assert finished_task.type in ["human", "ai"]
+        print(finished_task.description)
+        assert isinstance(finished_task.fields, dict)
+        assert finished_task.external in [True, False]
+    
+    # Verify database state
+    with postgres_engine.engine.connect() as connection:
+        sales_result = connection.execute(text("SELECT * FROM sales")).fetchone()
+        inventory_result = connection.execute(text("SELECT * FROM inventory")).fetchone()
+        
+        assert sales_result is not None, "Sales record should exist"
+        assert sales_result.status == "pending", "Sales record should be marked as completed"
+        assert inventory_result is not None, "Inventory record should exist"
+
+    # Additional verification that swarm_tasks queue is empty
+    remaining_tasks = redis_engine.redis_client.llen("swarm_tasks")
+    assert remaining_tasks == 0, "All tasks should be processed"

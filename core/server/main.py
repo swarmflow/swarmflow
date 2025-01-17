@@ -1,8 +1,18 @@
 from fastapi import FastAPI, Request
+from ..redis_engine.redis_engine import RedisEngine
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-app = FastAPI()
+redis_engine = RedisEngine()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    redis_engine.schedule_starter_points()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 # Add CORS middleware

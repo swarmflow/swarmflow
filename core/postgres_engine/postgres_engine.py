@@ -1,16 +1,42 @@
 from ..config import Config
+from ..metatables.metatables import MetaTables
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from ..server.main import app
 import psycopg2
 from fastapi import Request
+import json
 
 class PostgresEngine:
     def __init__(self):
         self.config = Config()
         self.engine = create_engine(self.config.postgres_url)
         self.router = app.router
+        self.meta_tables = MetaTables(self)
+        # self.setup_redis_fdw()
 
+    def setup_redis_fdw(self):
+        setup_sql = """
+        CREATE EXTENSION IF NOT EXISTS redis_fdw;
+        DROP SERVER IF EXISTS redis_server CASCADE;
+        CREATE SERVER redis_server 
+            FOREIGN DATA WRAPPER redis_fdw 
+            OPTIONS (address :redis_host, port :redis_port);
+        CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER
+            SERVER redis_server;
+        DROP FOREIGN TABLE IF EXISTS swarm_tasks;
+        CREATE FOREIGN TABLE swarm_tasks (
+            task text
+        ) SERVER redis_server
+        OPTIONS (tabletype 'list', tablekeyprefix 'swarm_tasks');
+        """
+        
+        with self.engine.connect() as connection:
+            with connection.begin():
+                connection.execute(text(setup_sql), {
+                    "redis_host": self.config.REDIS_HOST,
+                    "redis_port": str(self.config.REDIS_PORT)
+                })
         
     def define_entity(self, table_name: str, columns: dict, db_url: str):
         """
@@ -115,16 +141,83 @@ class PostgresEngine:
         try:
             with self.engine.connect() as connection:
                 with connection.begin():
+
                     for trigger in triggers:
                         function_name = f"{workflow_name}_{trigger['name']}_fn"
-                        function_sql = f"CREATE OR REPLACE FUNCTION {function_name}() RETURNS TRIGGER AS $$ {trigger['logic']} $$ LANGUAGE plpgsql;"
+                        form_name = trigger.get('form_name', f"process_{table}")
+                        callback_url = trigger.get('callback_url', f"http://test_app:8000/forms/{form_name}")
+                        form_fields = trigger.get('form_fields', {})
+                        task_type = trigger.get("type", "")  # Default empty string instead of empty dict
+                        isExternal = trigger.get("isExternal", False)
+                        starter = trigger.get("starter", False)
+
+                        # Properly escape and format the JSON fields
+                        task_json = {
+                            'description': f"Process form {form_name}",
+                            'callback_url': callback_url,
+                            'fields': form_fields,
+                            'type': task_type,
+                            'external': isExternal,
+                            'starter': starter
+                        }
+
+                        enhanced_logic = f"""
+                        BEGIN
+                            {trigger['logic']}
+                            
+                            INSERT INTO swarm_tasks VALUES ( 
+                                jsonb_build_object(
+                                    'description', 'Process form ' || $1,
+                                    'callback_url', $2,
+                                    'fields', $3::jsonb,
+                                    'type', $4,
+                                    'external', $5,
+                                    'starter', $6
+                                )::text
+                            );
+                            RETURN NEW;
+                        END;
+                        """
+
+                        # Create function with parameterized values
+                        function_sql = f"""
+                        CREATE OR REPLACE FUNCTION {function_name}() 
+                        RETURNS TRIGGER AS $$
+                        {enhanced_logic}
+                        $$ LANGUAGE plpgsql;
+                        """
+                        
+                        # Create trigger
+                        trigger_sql = f"""
+                        DROP TRIGGER IF EXISTS {trigger['name']} ON {table};
+                        CREATE TRIGGER {trigger['name']}
+                        {trigger['timing']} {trigger['event']} ON {table}
+                        FOR EACH ROW
+                        WHEN ({trigger['condition']})
+                        EXECUTE FUNCTION {function_name}();
+                        """
+
+                        # Execute with proper SQLAlchemy text() wrapper
                         connection.execute(text(function_sql))
-                        trigger_name = f"{workflow_name}_{trigger['name']}"
-                        trigger_sql = f"DROP TRIGGER IF EXISTS {trigger_name} ON {table}; CREATE TRIGGER {trigger_name} {trigger['timing']} {trigger['event']} ON {table} FOR EACH ROW EXECUTE FUNCTION {function_name}();"
                         connection.execute(text(trigger_sql))
-                    return f"Workflow '{workflow_name}' defined successfully with triggers."
+                        
+                        # Verify the function and trigger were created
+                        verify_sql = f"""
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_trigger 
+                            WHERE tgname = '{trigger['name']}'
+                        );
+                        """
+                        result = connection.execute(text(verify_sql)).scalar()
+                        if not result:
+                            raise Exception(f"Trigger {trigger['name']} was not created properly")
+
+            return f"Workflow '{workflow_name}' defined with form field mappings"
+
         except SQLAlchemyError as e:
             return f"Error defining workflow '{workflow_name}': {str(e)}"
+
+
 
     def define_form(self, form_name: str, operations: list):
         async def form_endpoint(request: Request):
@@ -179,3 +272,97 @@ class PostgresEngine:
 
         self.router.add_api_route(f"/reports/{report_name}", report_endpoint, methods=["GET"])
         return f"Report '{report_name}' registered successfully."
+
+    def validate_redis_fdw(self):
+        """
+        Validates the Redis Foreign Data Wrapper setup by checking:
+        1. Extension installation
+        2. Server configuration 
+        3. User mapping
+        4. Foreign table creation
+        5. Connection functionality
+        """
+        try:
+            with self.engine.connect() as connection:
+                with connection.begin():
+                    # 1. Check if redis_fdw extension exists
+                    extension_check = """
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_extension WHERE extname = 'redis_fdw'
+                        );
+                    """
+                    has_extension = connection.execute(text(extension_check)).scalar()
+                    if not has_extension:
+                        raise Exception("redis_fdw extension is not installed")
+
+                    # 2. Verify Redis server configuration
+                    server_check = """
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_foreign_server 
+                            WHERE address = 'test_redis'
+                        );
+                    """
+                    has_server = connection.execute(text(server_check)).scalar()
+                    if not has_server:
+                        raise Exception("Redis server foreign data wrapper is not configured")
+
+                    # 3. Check user mapping
+                    user_mapping_check = """
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_user_mappings 
+                            WHERE srvname = 'test_redis'
+                        );
+                    """
+                    has_mapping = connection.execute(text(user_mapping_check)).scalar()
+                    if not has_mapping:
+                        raise Exception("User mapping for Redis server is not configured")
+
+                    # 4. Verify foreign table existence
+                    table_check = """
+                        SELECT EXISTS (
+                            SELECT 1 FROM pg_foreign_table ft
+                            JOIN pg_class c ON ft.ftrelid = c.oid
+                            WHERE c.relname = 'swarm_tasks'
+                        );
+                    """
+                    has_table = connection.execute(text(table_check)).scalar()
+                    if not has_table:
+                        raise Exception("Foreign table 'swarm_tasks' does not exist")
+
+                    # 5. Test Redis connection functionality
+                    connection_test = """
+                        SELECT COUNT(*) FROM redis_swarm_tasks;
+                    """
+                    try:
+                        connection.execute(text(connection_test))
+                    except Exception as e:
+                        raise Exception(f"Cannot query Redis foreign table: {str(e)}")
+
+                    # Additional validation: Test insert functionality
+                    insert_test = """
+                        INSERT INTO swarm_tasks VALUES ('{"test": "connection"}');
+                        DELETE FROM swarm_tasks WHERE task::jsonb->>'test' = 'connection';
+                    """
+                    try:
+                        connection.execute(text(insert_test))
+                    except Exception as e:
+                        raise Exception(f"Cannot insert/delete from Redis foreign table: {str(e)}")
+
+                    return {
+                        "status": "success",
+                        "message": "Redis FDW setup is valid and functional",
+                        "details": {
+                            "extension_installed": has_extension,
+                            "server_configured": has_server,
+                            "user_mapping_exists": has_mapping,
+                            "foreign_table_exists": has_table,
+                            "connection_functional": True
+                        }
+                    }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e),
+                "details": None
+            }
