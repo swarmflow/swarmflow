@@ -1,42 +1,22 @@
 from ..config import Config
 from ..metatables.metatables import MetaTables
+from typing import Dict, List
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from ..server.main import app
 import psycopg2
 from fastapi import Request
 import json
+from ..schemas.schemas import SwarmTask
+from ..redis_engine.redis_engine import RedisEngine
+from copy import deepcopy
 
 class PostgresEngine:
     def __init__(self):
         self.config = Config()
         self.engine = create_engine(self.config.postgres_url)
-        self.router = app.router
         self.meta_tables = MetaTables(self)
         # self.setup_redis_fdw()
 
-    def setup_redis_fdw(self):
-        setup_sql = """
-        CREATE EXTENSION IF NOT EXISTS redis_fdw;
-        DROP SERVER IF EXISTS redis_server CASCADE;
-        CREATE SERVER redis_server 
-            FOREIGN DATA WRAPPER redis_fdw 
-            OPTIONS (address :redis_host, port :redis_port);
-        CREATE USER MAPPING IF NOT EXISTS FOR CURRENT_USER
-            SERVER redis_server;
-        DROP FOREIGN TABLE IF EXISTS swarm_tasks;
-        CREATE FOREIGN TABLE swarm_tasks (
-            task text
-        ) SERVER redis_server
-        OPTIONS (tabletype 'list', tablekeyprefix 'swarm_tasks');
-        """
-        
-        with self.engine.connect() as connection:
-            with connection.begin():
-                connection.execute(text(setup_sql), {
-                    "redis_host": self.config.REDIS_HOST,
-                    "redis_port": str(self.config.REDIS_PORT)
-                })
         
     def define_entity(self, table_name: str, columns: dict, db_url: str):
         """
@@ -137,141 +117,89 @@ class PostgresEngine:
             return f"Error retrieving schema for table '{table_name}': {str(e)}"
 
 
-    def define_workflow(self, workflow_name: str, table: str, triggers: list, db_url: str):
-        try:
-            with self.engine.connect() as connection:
-                with connection.begin():
+    def define_form(self, form_name: str, config: Dict) -> Dict:
+        """
+        Define form using MetaTables storage
+        
+        Args:
+            form_name: Name of the form
+            config: Dictionary containing:
+                - operations: List of database operations
+                - next_step: Next form configuration
+                - fields: Required form fields
+                - tool: Processing tool
+                - type: Form type (ai/manual/external)
+                - external: External integration flag
+                - report_url: Associated report URL
+        """
+        return self.meta_tables.add_form(form_name, config)
 
-                    for trigger in triggers:
-                        function_name = f"{workflow_name}_{trigger['name']}_fn"
-                        form_name = trigger.get('form_name', f"process_{table}")
-                        callback_url = trigger.get('callback_url', f"http://test_app:8000/forms/{form_name}")
-                        form_fields = trigger.get('form_fields', {})
-                        task_type = trigger.get("type", "")  # Default empty string instead of empty dict
-                        isExternal = trigger.get("isExternal", False)
-                        starter = trigger.get("starter", False)
+    def define_report(self, report_name: str, config: Dict) -> Dict:
+        """
+        Define report using MetaTables storage
+        
+        Args:
+            report_name: Name of the report
+            config: Dictionary containing:
+                - table_name: Source table
+                - fields: Fields to display
+                - filters: Filter conditions
+                - sorting: Sort configuration
+                - aggregations: Aggregation settings
+                - pagination: Pagination config
+                - permissions: Access control
+        """
+        return self.meta_tables.add_report(report_name, config)
 
-                        # Properly escape and format the JSON fields
-                        task_json = {
-                            'description': f"Process form {form_name}",
-                            'callback_url': callback_url,
-                            'fields': form_fields,
-                            'type': task_type,
-                            'external': isExternal,
-                            'starter': starter
-                        }
-
-                        enhanced_logic = f"""
-                        BEGIN
-                            {trigger['logic']}
-                            
-                            INSERT INTO swarm_tasks VALUES ( 
-                                jsonb_build_object(
-                                    'description', 'Process form ' || $1,
-                                    'callback_url', $2,
-                                    'fields', $3::jsonb,
-                                    'type', $4,
-                                    'external', $5,
-                                    'starter', $6
-                                )::text
-                            );
-                            RETURN NEW;
-                        END;
-                        """
-
-                        # Create function with parameterized values
-                        function_sql = f"""
-                        CREATE OR REPLACE FUNCTION {function_name}() 
-                        RETURNS TRIGGER AS $$
-                        {enhanced_logic}
-                        $$ LANGUAGE plpgsql;
-                        """
-                        
-                        # Create trigger
-                        trigger_sql = f"""
-                        DROP TRIGGER IF EXISTS {trigger['name']} ON {table};
-                        CREATE TRIGGER {trigger['name']}
-                        {trigger['timing']} {trigger['event']} ON {table}
-                        FOR EACH ROW
-                        WHEN ({trigger['condition']})
-                        EXECUTE FUNCTION {function_name}();
-                        """
-
-                        # Execute with proper SQLAlchemy text() wrapper
-                        connection.execute(text(function_sql))
-                        connection.execute(text(trigger_sql))
-                        
-                        # Verify the function and trigger were created
-                        verify_sql = f"""
-                        SELECT EXISTS (
-                            SELECT 1 FROM pg_trigger 
-                            WHERE tgname = '{trigger['name']}'
-                        );
-                        """
-                        result = connection.execute(text(verify_sql)).scalar()
-                        if not result:
-                            raise Exception(f"Trigger {trigger['name']} was not created properly")
-
-            return f"Workflow '{workflow_name}' defined with form field mappings"
-
-        except SQLAlchemyError as e:
-            return f"Error defining workflow '{workflow_name}': {str(e)}"
-
-
-
-    def define_form(self, form_name: str, operations: list):
-        async def form_endpoint(request: Request):
-            payload = await request.json()
-            results = []
-            with self.engine.connect() as connection:
-                with connection.begin():
-                    for operation in operations:
-                        table = operation["table"]
-                        data = {key: payload[key] for key in operation["data"].keys() if key in payload}
-                        columns = ", ".join(data.keys())
-                        values = ", ".join([f":{k}" for k in data.keys()])
-                        sql = f"""
-                        INSERT INTO {table} ({columns})
-                        VALUES ({values})
-                        RETURNING id;
-                        """
-                        # In postgres_engine.py, form_endpoint
-                        result = connection.execute(text(sql), data).mappings().first()
-                        results.append({"table": table, "data": dict(result)})
-
-
-            return {"message": "Form processed successfully", "results": results}
-
-        print(f"Registering form route: /forms/{form_name}")
-        app.router.add_api_route(f"/forms/{form_name}", form_endpoint, methods=["POST"])
-        print(f"Available routes after registration: {[route.path for route in app.routes]}")
-        return f"Form '{form_name}' registered successfully."
-
-
-    def define_reports(self, report_name: str, table: str, fields: list, filters: dict = None):
-        async def report_endpoint():
-            fields_with_analytics = [
-                *fields,
-                "ROW_NUMBER() OVER (ORDER BY id) as row_num",
-                "COUNT(*) OVER () as total_count"
-            ]
-            query = f"SELECT {', '.join(fields_with_analytics)} FROM {table}"
-            params = {}
-            if filters:
-                conditions = []
-                for key, value in filters.items():
-                    conditions.append(f"{key} = :{key}")
-                    params[key] = value
-                query += " WHERE " + " AND ".join(conditions)
+    def define_workflow(self, workflow_name: str, steps: List[Dict]) -> Dict:
+        """
+        Define workflow by creating linked forms and reports
+        
+        Args:
+            workflow_name: Name of the workflow
+            steps: List of step configurations containing form and report definitions
+        """
+        workflow_components = []
+        
+        for i, step in enumerate(steps):
+            # Get next step if not the last step
+            next_step = steps[i + 1] if i < len(steps) - 1 else None
             
-            with self.engine.connect() as connection:
-                with connection.begin():
-                    result = connection.execute(text(query), params).mappings().all()
-                    data = [dict(row) for row in result]
-            return {"data": data}
+            # Define form
+            form_config = {
+                "operations": step["operations"],
+                "fields": step.get("fields", []),
+                "tool": step.get("tool"),
+                "type": step.get("type", "manual"),
+                "external": step.get("external", False)
+            }
+            
+            # Add next step configuration if exists
+            if next_step:
+                form_config["next_step"] = {
+                    "form_name": next_step["form_name"],
+                    "conditions": step.get("conditions", {}),
+                    "fields": next_step.get("fields", [])
+                }
+                
+            # Add report configuration if specified
+            if "report" in step:
+                report = self.define_report(
+                    f"{workflow_name}_{step['form_name']}_report",
+                    step["report"]
+                )
+                form_config["report_url"] = f"/reports/{report['name']}"
+                workflow_components.append({"type": "report", "id": report["id"]})
+                
+            # Create the form
+            form = self.define_form(step["form_name"], form_config)
+            workflow_components.append({"type": "form", "id": form["id"]})
+        
+        return {
+            "name": workflow_name,
+            "components": workflow_components
+        }
 
-        self.router.add_api_route(f"/reports/{report_name}", report_endpoint, methods=["GET"])
-        return f"Report '{report_name}' registered successfully."
 
     def validate_redis_fdw(self):
         """

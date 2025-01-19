@@ -1,6 +1,7 @@
 from sqlalchemy import text, inspect
+from sqlalchemy.exc import SQLAlchemyError
 from typing import Dict, List, Any
-
+import json
 class MetaTables:
     def __init__(self, engine):
         self.pg = engine
@@ -26,18 +27,28 @@ class MetaTables:
             self.pg.define_entity("forms", {
                 "id": "SERIAL PRIMARY KEY",
                 "name": "VARCHAR(255) NOT NULL",
-                "operations": "JSONB NOT NULL",
+                "operations": "JSONB NOT NULL",  # Stores table and data field mappings
+                "next_step": "JSONB",  # Stores next form configuration including conditions
+                "fields": "JSONB",     # Required fields for the form
+                "tool": "VARCHAR(255)", # Tool to use for processing
+                "type": "VARCHAR(50)",  # ai/manual/external
+                "external": "BOOLEAN DEFAULT FALSE",
+                "report_url": "VARCHAR(255)",
                 "status": "VARCHAR(50) DEFAULT 'active'"
             }, self.pg.config.postgres_url)
 
-        # Reports table
-        if not self.table_exists('reportss'):
+        # Reports table with complete configuration
+        if not self.table_exists('reports'):
             self.pg.define_entity("reports", {
                 "id": "SERIAL PRIMARY KEY",
                 "name": "VARCHAR(255) NOT NULL",
                 "table_name": "VARCHAR(255) NOT NULL",
-                "fields": "JSONB NOT NULL",
-                "filters": "JSONB",
+                "fields": "JSONB NOT NULL",      # Fields to display
+                "filters": "JSONB",              # Filter conditions
+                "sorting": "JSONB",              # Sorting configuration
+                "aggregations": "JSONB",         # Any COUNT, SUM, etc.
+                "pagination": "JSONB",           # Page size and other pagination settings
+                "permissions": "JSONB",          # Access control settings
                 "status": "VARCHAR(50) DEFAULT 'active'"
             }, self.pg.config.postgres_url)
 
@@ -101,29 +112,88 @@ class MetaTables:
             result = conn.execute(text("SELECT * FROM entities WHERE status = 'active'"))
             return [dict(row) for row in result]
         
-    def add_form(self, name: str, operations: List[Dict[str, Any]]) -> Dict:
-        with self.pg.engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                INSERT INTO forms (name, operations)
-                VALUES (:name, :operations)
-                RETURNING id
-                """),
-                {"name": name, "operations": operations}
-            )
-            return {"id": result.scalar(), "name": name}
 
-    def add_report(self, name: str, table_name: str, fields: List[str], filters: Dict = None) -> Dict:
+    def add_form(self, name: str, config: Dict) -> Dict:
+        """Define forms in PostgreSQL with complete configuration structure"""
         with self.pg.engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                INSERT INTO reports (name, table_name, fields, filters)
-                VALUES (:name, :table_name, :fields, :filters)
-                RETURNING id
-                """),
-                {"name": name, "table_name": table_name, "fields": fields, "filters": filters}
-            )
-            return {"id": result.scalar(), "name": name}
+            with conn.begin():
+                # First insert the form
+                insert_sql = text("""
+                INSERT INTO forms (name, operations, next_step, fields, tool, type, external, report_url)
+                VALUES (
+                    :name, 
+                    cast(:operations as jsonb), 
+                    cast(:next_step as jsonb), 
+                    cast(:fields as jsonb),
+                    :tool, 
+                    :type, 
+                    :external, 
+                    :report_url
+                )
+                RETURNING id;
+                """)
+                
+                params = {
+                    "name": name,
+                    "operations": json.dumps(config.get("operations", {})),
+                    "next_step": json.dumps(config.get("next_step")),
+                    "fields": json.dumps(config.get("fields", [])),
+                    "tool": config.get("tool"),
+                    "type": config.get("type", "ai"),
+                    "external": config.get("external", False),
+                    "report_url": config.get("report_url")
+                }
+                
+                result = conn.execute(insert_sql, params)
+                form_id = result.scalar()
+                
+                # Then fetch the complete form data
+                fetch_sql = text("SELECT * FROM forms WHERE id = :id")
+                form_data = conn.execute(fetch_sql, {"id": form_id}).mappings().first()
+                
+                return dict(form_data)
+
+
+        
+
+    def add_report(self, name: str, config: Dict) -> Dict:
+        with self.pg.engine.connect() as conn:
+            with conn.begin():
+                # First insert the report
+                insert_sql = text("""
+                INSERT INTO reports (
+                    name, table_name, fields, filters, 
+                    sorting, aggregations, pagination, permissions
+                )
+                VALUES (
+                    :name, :table_name, 
+                    cast(:fields as jsonb), cast(:filters as jsonb),
+                    cast(:sorting as jsonb), cast(:aggregations as jsonb), 
+                    cast(:pagination as jsonb), cast(:permissions as jsonb)
+                )
+                RETURNING id;
+                """)
+                
+                params = {
+                    "name": name,
+                    "table_name": config["table_name"],
+                    "fields": json.dumps(config["fields"]),
+                    "filters": json.dumps(config.get("filters")),
+                    "sorting": json.dumps(config.get("sorting")),
+                    "aggregations": json.dumps(config.get("aggregations")),
+                    "pagination": json.dumps(config.get("pagination", {"page_size": 50})),
+                    "permissions": json.dumps(config.get("permissions", {}))
+                }
+                
+                result = conn.execute(insert_sql, params)
+                report_id = result.scalar()
+                
+                # Then fetch the complete report data
+                fetch_sql = text("SELECT * FROM reports WHERE id = :id")
+                report_data = conn.execute(fetch_sql, {"id": report_id}).mappings().first()
+                
+                return dict(report_data)
+
 
     def add_workflow(self, name: str, table_name: str, triggers: List[Dict]) -> Dict:
         with self.pg.engine.connect() as conn:
@@ -191,3 +261,31 @@ class MetaTables:
         with self.pg.engine.connect() as conn:
             result = conn.execute(text("SELECT * FROM agents WHERE status = 'active'"))
             return [dict(row) for row in result]
+    
+    def get_form_by_name(self, name: str) -> Dict:
+        """
+        Retrieve a specific form configuration by name
+        """
+        with self.pg.engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT * FROM forms WHERE name = :name"),
+                {"name": name}
+            ).mappings().first()
+            
+            if result:
+                return dict(result)
+            return None
+
+    def get_report_by_name(self, name: str) -> Dict:
+        """
+        Retrieve a specific report configuration by name
+        """
+        with self.pg.engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT * FROM reports WHERE name = :name"),
+                {"name": name}
+            ).mappings().first()
+            
+            if result:
+                return dict(result)
+            return None

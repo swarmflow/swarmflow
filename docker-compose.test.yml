@@ -36,9 +36,7 @@ services:
       start_period: 5s
 
   test_postgres:
-    build:
-      context: .
-      dockerfile: postgres/Dockerfile
+    image: postgres:17
     container_name: test_postgres_db
     ports:
       - "5433:5432"

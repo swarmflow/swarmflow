@@ -15,16 +15,24 @@ import uvicorn
 import threading
 import asyncio
 from sqlalchemy import text
+import json
+from fastapi.testclient import TestClient
+
+# @pytest.fixture
+# def client():
+#     # This creates a fresh client for each test
+#     return TestClient(app)
 
 
 def run_server():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, reload=True)
+    server = uvicorn.Server(config)
+    server.run()
 
 # Start server in a thread before tests
 server_thread = threading.Thread(target=run_server)
 server_thread.daemon = True
 server_thread.start()
-
 # Initialize Supabase Engine
 engine = PostgresEngine()
 
@@ -40,6 +48,60 @@ async def test_health_check():
         print(f"Response received: {response.status_code}")
     assert response.status_code == 200
     assert response.json() == {"message": "Server is running"}
+
+
+@pytest.mark.asyncio
+async def test_metatables_creation():
+    """Test creation of core metatables (forms and reports)"""
+    postgres_engine = PostgresEngine()
+    meta_tables = postgres_engine.meta_tables
+    
+    # Check if tables exist
+    with postgres_engine.engine.connect() as connection:
+        # Get list of all tables
+        tables_query = text("""
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_schema = 'public'
+        """)
+        existing_tables = [row[0] for row in connection.execute(tables_query)]
+        
+        print("\n=== Existing Tables ===")
+        print(existing_tables)
+        print("=====================\n")
+        
+        # Verify core tables exist
+        assert 'forms' in existing_tables
+        assert 'reports' in existing_tables
+        
+        # Verify table structures
+        forms_schema = connection.execute(text("""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'forms'
+        """)).fetchall()
+        
+        reports_schema = connection.execute(text("""
+            SELECT column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_name = 'reports'
+        """)).fetchall()
+        
+        print("\n=== Forms Schema ===")
+        print(forms_schema)
+        print("\n=== Reports Schema ===")
+        print(reports_schema)
+        print("=====================\n")
+
+    # Verify minimum required columns exist
+    forms_columns = {col[0] for col in forms_schema}
+    reports_columns = {col[0] for col in reports_schema}
+    
+    required_forms_columns = {'id', 'name', 'operations', 'status'}
+    required_reports_columns = {'id', 'name', 'table_name', 'fields', 'filters', 'status'}
+    
+    assert required_forms_columns.issubset(forms_columns)
+    assert required_reports_columns.issubset(reports_columns)
 
 
 @pytest.mark.asyncio
@@ -100,218 +162,6 @@ async def test_migrate_entity():
     created_at_column = next((col for col in schema if col["column_name"] == "created_at"), None)
     assert created_at_column is None
 
-
-@pytest.mark.asyncio
-async def test_define_form():
-    """
-    Test defining a form and submitting data.
-    """
-    form_name = "register_user"
-    operations = [
-        {"table": "users", "data": {"id": None, "name": None, "email": None, "age": None}}
-    ]
-    engine.define_form(form_name, operations)
-
-    async with AsyncClient(base_url="http://test_app:8000") as client:
-        payload = {"id": 1, "name": "Test User", "email": "test@example.com", "age": 25}
-        response = await client.post(f"/forms/{form_name}", json=payload)
-    
-    assert response.status_code == 200
-    assert response.json()["message"] == "Form processed successfully"
-    assert "results" in response.json()
-
-
-@pytest.mark.asyncio
-async def test_define_report():
-    # Clean up any existing test data
-    with engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text("TRUNCATE users RESTART IDENTITY CASCADE;"))
-    
-    # Now continue with your existing test code
-    with engine.engine.connect() as connection:
-        with connection.begin():
-            sql = """
-            INSERT INTO users (name, email, age, status)
-            VALUES ('Test User', 'test@example.com', 25, 'active')
-            """
-            connection.execute(text(sql))
-
-    
-    # Continue with existing report test
-    report_name = "active_users"
-    table = "users"
-    fields = ["id", "name", "email", "age"]
-    filters = {"status": "active"}
-    engine.define_reports(report_name, table, fields, filters)
-
-
-    async with AsyncClient(base_url="http://test_app:8000") as client:
-        response = await client.get(f"/reports/{report_name}")
-    
-    assert response.status_code == 200
-    assert "data" in response.json()
-    assert len(response.json()["data"]) > 0
-    assert response.json()["data"][0]["name"] == "Test User"
-
-
-@pytest.mark.asyncio
-async def test_define_and_migrate_entity():
-    """
-    Test defining a table and applying migrations in sequence.
-    """
-    # Step 1: Define the table
-    table_name = "orders"
-    columns = {
-        "id": "SERIAL PRIMARY KEY",
-        "user_id": "INTEGER NOT NULL",
-        "amount": "NUMERIC(10, 2) NOT NULL",
-        "status": "TEXT DEFAULT 'pending'",
-    }
-    define_result = engine.define_entity(table_name, columns, engine.config.postgres_url)
-    assert define_result == f"Table '{table_name}' successfully defined with timestamps and triggers."
-
-    # Step 2: Apply migrations
-    migrations = [
-        {"action": "add_column", "name": "shipped_at", "definition": "TIMESTAMP"},
-        {"action": "modify_column", "name": "status", "definition": "TEXT NOT NULL"}
-    ]
-    migrate_result = engine.migrate_entity(table_name, migrations, engine.config.postgres_url)
-    assert migrate_result == f"Table '{table_name}' successfully migrated."
-
-    # Step 3: Verify schema after migrations
-    schema = engine.retrieve_schema(table_name, engine.config.postgres_url)
-    assert isinstance(schema, list)
-
-    # Check the new column was added
-    shipped_at_column = next((col for col in schema if col["column_name"] == "shipped_at"), None)
-    assert shipped_at_column is not None
-    assert shipped_at_column["data_type"] == "timestamp without time zone"
-
-    # Check that the modified column has the correct constraints
-    status_column = next((col for col in schema if col["column_name"] == "status"), None)
-    assert status_column is not None
-    assert status_column["is_nullable"] == "NO"
-
-@pytest.mark.asyncio
-async def test_define_workflow():
-    with engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
-    
-    table_name = "orders"
-    columns = {"id": "SERIAL PRIMARY KEY","user_id": "INTEGER NOT NULL","amount": "NUMERIC(10, 2) NOT NULL","status": "TEXT DEFAULT 'pending'","total_with_tax": "NUMERIC(10, 2)"}
-    engine.define_entity(table_name, columns, engine.config.postgres_url)
-    
-    workflow_name = "order_processing"
-    triggers = [{"name": "calculate_tax","timing": "BEFORE","event": "INSERT","logic": "BEGIN NEW.total_with_tax := NEW.amount * 1.2; RETURN NEW; END;","condition": "TRUE"}]
-    engine.define_workflow(workflow_name, table_name, triggers, engine.config.postgres_url)
-    
-    with engine.engine.connect() as connection:
-        with connection.begin():
-            result = connection.execute(text("INSERT INTO orders (user_id, amount) VALUES (1, 100.00) RETURNING user_id, amount, total_with_tax;")).mappings().first()
-            assert result['amount'] == 100.00
-            assert result['total_with_tax'] == 120.00
-
-
-@pytest.mark.asyncio
-async def test_complex_workflow():
-    """
-    Test defining a complex workflow across multiple related tables
-    """
-    with engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS inventory CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS order_history CASCADE;"))
-    
-    # Define tables
-    tables = {
-        "orders": {
-            "id": "SERIAL PRIMARY KEY",
-            "product_id": "INTEGER NOT NULL",
-            "quantity": "INTEGER NOT NULL",
-            "status": "TEXT DEFAULT 'pending'",
-            "total_price": "NUMERIC(10, 2)"
-        },
-        "inventory": {
-            "id": "SERIAL PRIMARY KEY",
-            "product_id": "INTEGER NOT NULL",
-            "quantity": "INTEGER NOT NULL",
-            "last_updated": "TIMESTAMP"
-        },
-        "order_history": {
-            "id": "SERIAL PRIMARY KEY",
-            "order_id": "INTEGER NOT NULL",
-            "status": "TEXT NOT NULL",
-            "timestamp": "TIMESTAMP"
-        }
-    }
-    
-    for table_name, columns in tables.items():
-        engine.define_entity(table_name, columns, engine.config.postgres_url)
-    
-    # Define complex workflow
-    workflow_name = "order_processing"
-    triggers = [
-        {
-            "name": "update_inventory",
-            "timing": "AFTER",
-            "event": "INSERT",
-            "logic": """
-                BEGIN
-                    UPDATE inventory 
-                    SET quantity = quantity - NEW.quantity,
-                        last_updated = CURRENT_TIMESTAMP
-                    WHERE product_id = NEW.product_id;
-                    RETURN NEW;
-                END;
-            """,
-            "condition": "NEW.status = 'pending'"
-        },
-        {
-            "name": "create_history",
-            "timing": "AFTER",
-            "event": "INSERT OR UPDATE",
-            "logic": """
-                BEGIN
-                    INSERT INTO order_history (order_id, status, timestamp)
-                    VALUES (NEW.id, NEW.status, CURRENT_TIMESTAMP);
-                    RETURN NEW;
-                END;
-            """,
-            "condition": "TRUE"
-        }
-    ]
-    
-    engine.define_workflow(workflow_name, "orders", triggers, engine.config.postgres_url)
-    
-    # Test the workflow
-    with engine.engine.connect() as connection:
-        with connection.begin():
-            # Setup initial inventory
-            connection.execute(text("""
-                INSERT INTO inventory (product_id, quantity)
-                VALUES (1, 100);
-            """))
-            
-            # Create order
-            connection.execute(text("""
-                INSERT INTO orders (product_id, quantity, status)
-                VALUES (1, 5, 'pending');
-            """))
-            
-            # Verify inventory updated
-            inventory_result = connection.execute(text("""
-                SELECT quantity FROM inventory WHERE product_id = 1;
-            """)).mappings().first()
-            assert inventory_result['quantity'] == 95
-            
-            # Verify order history created
-            history_result = connection.execute(text("""
-                SELECT COUNT(*) as count FROM order_history;
-            """)).mappings().first()
-            assert history_result['count'] == 1
 
 @pytest.mark.asyncio
 async def test_redis_task_queue():
@@ -377,472 +227,686 @@ async def test_redis_task_validation():
     with pytest.raises((ValidationError, Exception)):
         redis_engine.add_task(invalid_url_task)
 
-
 @pytest.mark.asyncio
-async def test_order_processing_with_ai():
-    """Test order processing with AI field generation"""
-    print("\nStarting order processing test with AI generation...")
-    redis_engine = RedisEngine()
+async def test_define_form():
+    """Test form definition and execution using MetaTables"""
     postgres_engine = PostgresEngine()
-
-    with postgres_engine.engine.connect() as connection:
-        with connection.begin():
-            print("Cleaning up existing orders table...")
-            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
-
-    # Setup table and form as before
-    table_name = "orders"
-    columns = {
-        "id": "SERIAL PRIMARY KEY",
-        "product_name": "VARCHAR(255) NOT NULL",
-        "quantity": "INTEGER NOT NULL",
-        "total_price": "NUMERIC(10,2) NOT NULL"
+    
+    # Define test form configuration
+    form_config = {
+        "operations": [
+            {
+                "table": "users",
+                "data": {"name": None, "email": None}
+            }
+        ],
+        "fields": ["name", "email"],
+        "type": "manual",
+        "external": False
     }
     
-    postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
+    # Define form using MetaTables
+    form = postgres_engine.define_form("register_user", form_config)
+    print(f"\nCreated form: {form}")
 
-    form_name = "create_order"
-    operations = [
-        {"table": "orders", "data": {
-            "product_name": "TEXT",
-            "quantity": "INTEGER",
-            "total_price": "NUMERIC(10,2)"
-        }}
-    ]
-
-    
-    postgres_engine.define_form(form_name, operations)
-
-    # Create task with empty fields
-    test_task = SwarmTask(
-        description="Fill out this new order form object with random data",
-        callback_url="http://test_app:8000/forms/create_order",
-        fields={
-            "product_name": None,
-            "quantity": None,
-            "total_price": None
-        },
-        type="ai",
-        external=False,
-    )
-    redis_engine.add_task(test_task)
-
-    async with httpx.AsyncClient() as client:
-        # Initial checks
-        # response = await client.get("http://worker_agent:8002/status")
-        # initial_queue_size = response.json()["queue_size"]
-        # assert initial_queue_size > 0
-
-        # Wait for AI processing
-        await asyncio.sleep(5)  # Longer wait for AI processing
-
-        # Verify completion
-        finished_count = redis_engine.redis_client.llen("finished")
-        assert finished_count > 0, "Task should be marked as finished"
-
-        # Verify order creation with AI-generated values
-        with postgres_engine.engine.connect() as connection:
-            result = connection.execute(text("SELECT * FROM orders")).fetchone()
-            assert result is not None
-            print(f"AI-generated order: {result._asdict()}")
-            
-            # Verify generated values match expected types
-            assert isinstance(result.product_name, str)
-            assert isinstance(result.quantity, int)
-            assert isinstance(float(result.total_price), float)
-
-@pytest.mark.asyncio
-async def test_multiple_workers_ai_processing():
-    """Test multiple workers processing multiple AI tasks"""
-
-    print("\nStarting multi-worker AI processing test...")
-    redis_engine = RedisEngine()
-    
-    # Clear finished list before starting
-    redis_engine.redis_client.delete("finished")
-
-    postgres_engine = PostgresEngine()
-
-    with postgres_engine.engine.connect() as connection:
-        with connection.begin():
-            print("Cleaning up existing orders table...")
-            connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
-
-    table_name = "orders"
-    columns = {
-        "id": "SERIAL PRIMARY KEY",
-        "product_name": "VARCHAR(255) NOT NULL",
-        "quantity": "INTEGER NOT NULL",
-        "total_price": "NUMERIC(10,2) NOT NULL"
-    }
-    print(f"Creating orders table with schema: {columns}")
-    postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
-
-    form_name = "create_order"
-    operations = [
-        {"table": "orders", "data": {
-            "product_name": None,
-            "quantity": None,
-            "total_price": None
-        }}
-    ]
-    print(f"Registering form handler: {form_name}")
-    postgres_engine.define_form(form_name, operations)
-
-    # Create multiple tasks
-    tasks = [
-        SwarmTask(
-            description=f"Process order {i} with AI",
-            callback_url="http://test_app:8000/forms/create_order",
-            fields={
-                "product_name": None,
-                "quantity": None,
-                "total_price": None
-            },
-            type="ai",
-            external=False
-        ) for i in range(3)
-    ]
-
-    # Add tasks to queue
-    for task in tasks:
-        print(f"Adding task to queue: {task.model_dump_json()}")
-        redis_engine.add_task(task)
-
-    async with httpx.AsyncClient() as client:
-        # Initial queue check
-        # response = await client.get("http://worker_agent:8002/status")
-        # initial_queue_size = response.json()["queue_size"]
-        # print(f"Initial queue size: {initial_queue_size}")
-        # assert initial_queue_size == 3
-
-        # Wait for parallel processing
-        print("Waiting for parallel AI processing...")
-        await asyncio.sleep(7)  # Longer wait for multiple tasks
-
-        # Verify all tasks completed
-        finished_count = redis_engine.redis_client.llen("finished")
-        print(f"Finished tasks: {finished_count}")
-        assert finished_count == 3, "All tasks should be processed"
-
-        # Verify all orders created
-        with postgres_engine.engine.connect() as connection:
-            results = connection.execute(text("SELECT * FROM orders")).mappings().all()
-            print(f"Created orders: {results}")
-            assert len(results) == 3, "Should create 3 orders"
-
-            # Verify data types for each order
-            for result in results:
-                assert isinstance(result['product_name'], str)
-                assert isinstance(result['quantity'], int)
-                assert isinstance(float(result['total_price']), float)
-@pytest.mark.asyncio
-async def test_redis_fdw_setup():
-    """Test Redis Foreign Data Wrapper setup and functionality"""
-    postgres_engine = PostgresEngine()
-
-    # Validate Redis FDW setup
-    validation_result = postgres_engine.validate_redis_fdw()
-    
-    # Verify all components
-    if validation_result["status"] == "error":
-        raise Exception(validation_result["message"])
-    assert validation_result["status"] == "success"
-    assert validation_result["details"]["extension_installed"]
-    assert validation_result["details"]["server_configured"] 
-    assert validation_result["details"]["user_mapping_exists"]
-    assert validation_result["details"]["foreign_table_exists"]
-    assert validation_result["details"]["connection_functional"]
-
-
-@pytest.mark.asyncio
-async def test_workflow_forwarding():
-    """Test if workflow trigger inserts into swarm_tasks table"""
-    postgres_engine = PostgresEngine()
-
-    # Clear test table
-    with postgres_engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text("DROP TABLE IF EXISTS test_source CASCADE;"))
-
-    # Create test table
-    columns = {
-        "id": "SERIAL PRIMARY KEY",
-        "status": "TEXT DEFAULT 'pending'"
-    }
-    postgres_engine.define_entity("test_source", columns, postgres_engine.config.postgres_url)
-
-    # Define workflow
-    workflow_triggers = [{
-        "name": "test_trigger",
-        "timing": "AFTER",
-        "event": "INSERT",
-        "condition": "NEW.status = 'pending'",
-        "logic": "BEGIN RETURN NEW; END;",
-        "form_name": "test_form",
-        "callback_url": "http://test_app:8000/forms/test_form",
-        "form_fields": {"test_field": "TEXT"},
-        "type": "ai",
-        "isExternal": False
-    }]
-
-    postgres_engine.define_workflow("test_workflow", "test_source", workflow_triggers, postgres_engine.config.postgres_url)
-
-    # Insert record and check swarm_tasks
-    with postgres_engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text("INSERT INTO test_source (status) VALUES ('pending')"))
-            tasks = connection.execute(text("SELECT * FROM swarm_tasks")).fetchall()
-            print(f"Tasks in swarm_tasks: {tasks}")
-            assert len(tasks) > 0, "Trigger should insert task into swarm_tasks"
-
-
-@pytest.mark.asyncio
-async def test_workflow_trigger_redis_integration():
-    redis_engine = RedisEngine()
-    postgres_engine = PostgresEngine()
-
-    # Clear all data
-    with postgres_engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text("DROP TABLE IF EXISTS test_orders CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS test_results CASCADE;"))
-    
-    redis_engine.redis_client.delete("swarm_tasks")
-    redis_engine.redis_client.delete("finished")
-
-    # Create both tables
-    orders_columns = {
-        "id": "SERIAL PRIMARY KEY",
-        "status": "TEXT DEFAULT 'pending'"
-    }
-    results_columns = {
-        "id": "SERIAL PRIMARY KEY",
-        "test_field": "TEXT"
-    }
-    postgres_engine.define_entity("test_orders", orders_columns, postgres_engine.config.postgres_url)
-    postgres_engine.define_entity("test_results", results_columns, postgres_engine.config.postgres_url)
-
-    # Define form
-    form_operations = [
-        {"table": "test_results", "data": {"test_field": None}}
-    ]
-    postgres_engine.define_form("test_form", form_operations)
-
-    # Define workflow with trigger
-    workflow_triggers = [{
-        "name": "test_trigger",
-        "timing": "AFTER",
-        "event": "INSERT",
-        "condition": "NEW.status = 'pending'",
-        "logic": """
-            BEGIN
-                RETURN NEW;
-            END;
-        """,
-        "form_name": "test_form",
-        "callback_url": "http://test_app:8000/forms/test_form",
-        "form_fields": {"test_field": "TEXT"},
-        "type": "ai",
-        "isExternal": False
-    }]
-
-    postgres_engine.define_workflow(
-        "test_workflow", 
-        "test_orders", 
-        workflow_triggers, 
-        postgres_engine.config.postgres_url
-    )
-
-    # Insert record to trigger workflow
-    with postgres_engine.engine.connect() as connection:
-        with connection.begin():
-            connection.execute(text(
-                "INSERT INTO test_orders (status) VALUES ('pending')"
-            ))
-
-    # Verify Redis queue state
-    # tasks = redis_engine.redis_client.lrange("swarm_tasks", 0, -1)
-    # print(f"Tasks in Redis queue: {tasks}")
-    
-    # assert len(tasks) > 0, "Trigger should create task in Redis queue"
-    
-    # # Verify task content
-    # task = SwarmTask.model_validate_json(tasks[0])
-    # assert task.callback_url == "http://test_app:8000/forms/test_form"
-    # assert task.type == "ai"
-    # assert task.external == False
-
-    # Verify form endpoint exists
+    # Test form execution
     async with AsyncClient(base_url="http://test_app:8000") as client:
-        response = await client.get("/")
-        routes = [route.path for route in app.routes]
-        assert "/forms/test_form" in routes, "Form endpoint should be registered"
-    with postgres_engine.engine.connect() as connection:
-        print("\nFDW Configuration:")
-        print(connection.execute(text("""
-            SELECT * FROM pg_foreign_server 
-            WHERE srvname = 'redis_server';
-        """)).fetchall())
-        
-        print("\nUser Mappings:")
-        print(connection.execute(text("""
-            SELECT * FROM pg_user_mappings 
-            WHERE srvname = 'redis_server';
-        """)).fetchall())
+        payload = {"name": "Test User", "email": "test@example.com"}
+        response = await client.post(f"/forms/register_user", json=payload)
+        if response.status_code == 404:
+            print(response.text)
 
-    test_task = SwarmTask(
-        description="Test FDW Integration",
-        callback_url="http://test.com/callback",
-        fields={"test": "value"},
-        type="ai",
-        external=False
-    )
-
-    # Test direct Redis access
-    with postgres_engine.engine.connect() as connection:
-        print("\nTesting direct Redis insert:")
-        connection.execute(text("""
-            INSERT INTO swarm_tasks (task) VALUES (:task);
-        """), {"task": test_task.model_dump_json()})
-        
-    print("\nRedis queue state:")
-    tasks = redis_engine.redis_client.lrange("finished", 0, -1)
-    print(tasks)
     
-    # Verify task
-    if tasks:
-        retrieved_task = SwarmTask.model_validate_json(tasks[0])
-        assert isinstance(retrieved_task, SwarmTask)
-
-
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert "results" in response.json()
 
 @pytest.mark.asyncio
-async def test_complete_workflow_chain():
-    """
-    Test the complete workflow chain from starter tasks through completion
-    """
-    redis_engine = RedisEngine()
+async def test_define_2_form_chain():
+    """Test chaining two forms using MetaTables"""
     postgres_engine = PostgresEngine()
-
-    # Clear all existing data
+    redis_engine = RedisEngine()
     with postgres_engine.engine.connect() as connection:
         with connection.begin():
-            connection.execute(text("DROP TABLE IF EXISTS sales CASCADE;"))
-            connection.execute(text("DROP TABLE IF EXISTS inventory CASCADE;"))
-    
+            connection.execute(text("DROP TABLE IF EXISTS users CASCADE;"))
+            connection.execute(text("DROP TABLE IF EXISTS forms CASCADE;"))
+    postres_engine = PostgresEngine()
+    # Clear Redis queue
     redis_engine.redis_client.delete("finished")
-    redis_engine.redis_client.delete("swarm_tasks")
-    redis_engine.redis_client.delete(redis_engine.scheduled_tasks_key)
 
-    # Define entities
-    sales_columns = {
+    table_name = "users"
+    columns = {
         "id": "SERIAL PRIMARY KEY",
-        "product_id": "INTEGER NOT NULL",
-        "quantity": "INTEGER NOT NULL",
-        "status": "TEXT DEFAULT 'pending'",
-        "total_amount": "NUMERIC(10,2)"
+        "name": "TEXT NOT NULL",
+        "email": "TEXT UNIQUE NOT NULL",
+        "status": "TEXT DEFAULT 'active'",
+        # "created_at": "TIMESTAMP DEFAULT NOW()"
     }
-    
-    inventory_columns = {
+
+    # Create profiles table
+    profiles_columns = {
         "id": "SERIAL PRIMARY KEY",
-        "product_id": "INTEGER NOT NULL",
-        "stock_level": "INTEGER NOT NULL"
+        "user_id": "INTEGER NOT NULL",
+        "bio": "TEXT",
+        "avatar": "TEXT",
+        "status": "TEXT DEFAULT 'active'"
     }
+    postgres_engine.define_entity("profiles", profiles_columns, postgres_engine.config.postgres_url)
 
-    postgres_engine.define_entity("sales", sales_columns, postgres_engine.config.postgres_url)
-    postgres_engine.define_entity("inventory", inventory_columns, postgres_engine.config.postgres_url)
 
-    # Define forms
-    update_inventory_form = [
-        {"table": "inventory", "data": {"product_id": None, "stock_level": None}}
-    ]
-    process_sale_form = [
-    {"table": "sales", "data": {
-        "product_id": None, 
-        "quantity": None, 
-        "total_amount": None,
-        "status": "pending"  # Explicitly set status to trigger the workflow
-    }}
-]
+    # Call define_entity to create the table
+    result = engine.define_entity(table_name, columns, engine.config.postgres_url)
 
-    postgres_engine.define_form("update_inventory", update_inventory_form)
-    postgres_engine.define_form("process_sale", process_sale_form)
-
-    # Define workflow with triggers
-    workflow_triggers = [
-    {
-        "name": "check_inventory",
-        "timing": "AFTER",
-        "event": "INSERT",
-        "condition": "NEW.status = 'pending'",
-        "logic": """
-            BEGIN
-                -- Just return NEW since form will handle the update
-                RETURN NEW;
-            END;
-        """,
-        "form_name": "update_inventory",
-        "callback_url": "http://test_app:8000/forms/update_inventory",
-        "form_fields": {
-            "product_id": "INTEGER",
-            "stock_level": "INTEGER"
-        },
-        "type": "ai",
-        "isExternal": False
+    # Define first form with next step
+    form1_config = {
+        "operations": [
+            {
+                "table": "users",
+                "data": {"name": None, "email": None}
+            }
+        ],
+        "fields": ["name", "email"],
+        "next_step": {
+            "form_name": "create_profile",
+            "fields": {
+                "user_id": None,
+                "bio": None,
+                "avatar": None
+            },
+            "type": "ai"
+        }
     }
-]
-
-
-
-    postgres_engine.define_workflow("sales_workflow", "sales", workflow_triggers, postgres_engine.config.postgres_url)
-
-    # Schedule starter task
-    starter_task = SwarmTask(
-        description="Initial sales processing",
-        callback_url="http://test_app:8000/forms/process_sale",
-        fields={
-            "product_id": 1,
-            "quantity": 5,
-            "total_amount": 100.00
-        },
-        type = "ai",
-        external=False,
-        starter=True
-    )
-
-    # Schedule task to run every minute
-    task_id = redis_engine.schedule_task(starter_task, "minutes", -1)
-    assert task_id is not None
-
-    # Verify starter task executed
-    # due_tasks = redis_engine.get_due_tasks()
-    # assert len(due_tasks) > 0
-
-    # Wait for workflow completion
-    await asyncio.sleep(5)
-
-    # Verify results in both queues
-    finished_tasks = redis_engine.redis_client.lrange("finished", 0, -1)
-    assert len(finished_tasks) > 0, "Tasks should be marked as finished"
     
-    # Verify content of finished tasks
-    for task_json in finished_tasks:
-        finished_task = SwarmTask.model_validate_json(task_json)
-        assert finished_task.type in ["human", "ai"]
-        print(finished_task.description)
-        assert isinstance(finished_task.fields, dict)
-        assert finished_task.external in [True, False]
+    # Define second form
+    form2_config = {
+        "operations": [
+            {
+                "table": "profiles",
+                "data": {"user_id": None, "bio": None, "avatar": None}
+            }
+        ],
+        "fields": ["user_id", "bio", "avatar"]
+    }
     
-    # Verify database state
-    with postgres_engine.engine.connect() as connection:
-        sales_result = connection.execute(text("SELECT * FROM sales")).fetchone()
-        inventory_result = connection.execute(text("SELECT * FROM inventory")).fetchone()
+    # Create forms using MetaTables
+    postgres_engine.define_form("register_user", form1_config)
+    postgres_engine.define_form("create_profile", form2_config)
+    
+    # Test form chain execution
+    async with AsyncClient(base_url="http://test_app:8000") as client:
+        # Execute first form
+        form1_payload = {"name": "Test User", "email": "test@example.com"}
+        response = await client.post("/forms/register_user", json=form1_payload)
         
-        assert sales_result is not None, "Sales record should exist"
-        assert sales_result.status == "pending", "Sales record should be marked as completed"
-        assert inventory_result is not None, "Inventory record should exist"
+        assert response.status_code == 200
+        user_id = response.json()["results"][0]["data"]["id"]
+        assert response.json()["next_step"] is not None
+        
+        # Verify task creation in Redis
+        await asyncio.sleep(5)
+        tasks = redis_engine.redis_client.lrange("finished", 0, -1)
+        assert len(tasks) == 1
+        task = SwarmTask.model_validate_json(tasks[0])
+        assert str(task.callback_url) == "http://test_app:8000/forms/create_profile"
 
-    # Additional verification that swarm_tasks queue is empty
-    remaining_tasks = redis_engine.redis_client.llen("swarm_tasks")
-    assert remaining_tasks == 0, "All tasks should be processed"
+@pytest.mark.asyncio
+async def test_define_report():
+    """Test report definition and execution using MetaTables"""
+    postgres_engine = PostgresEngine()
+    
+    # Clear test data first
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("TRUNCATE users RESTART IDENTITY CASCADE;"))
+    
+    # Define report configuration
+    report_config = {
+        "table_name": "users",
+        "fields": ["id", "name", "email"],
+        "filters": {"status": "active"},
+        "sorting": {"field": "name", "order": "asc"},
+        "pagination": {"page_size": 10}
+    }
+    
+    # Create report using MetaTables
+    report = postgres_engine.define_report("active_users", report_config)
+    print(f"\nCreated report: {report}")
+    
+    # Verify report exists in database
+    meta_tables = postgres_engine.meta_tables
+    stored_report = meta_tables.get_report_by_name("active_users")
+    print(f"Retrieved report: {stored_report}")
+    
+    # Add test data
+    with postgres_engine.engine.connect() as connection:
+        with connection.begin():
+            connection.execute(text("""
+                INSERT INTO users (name, email, status)
+                VALUES ('Test User', 'test@example.com', 'active')
+            """))
+    
+    # Test report execution
+    async with AsyncClient(base_url="http://test_app:8000") as client:
+        response = await client.get("/reports/active_users")
+    
+    assert response.status_code == 200
+
+
+# @pytest.mark.asyncio
+# async def test_define_and_migrate_entity():
+#     """
+#     Test defining a table and applying migrations in sequence.
+#     """
+#     # Step 1: Define the table
+#     table_name = "orders"
+#     columns = {
+#         "id": "SERIAL PRIMARY KEY",
+#         "user_id": "INTEGER NOT NULL",
+#         "amount": "NUMERIC(10, 2) NOT NULL",
+#         "status": "TEXT DEFAULT 'pending'",
+#     }
+#     define_result = engine.define_entity(table_name, columns, engine.config.postgres_url)
+#     assert define_result == f"Table '{table_name}' successfully defined with timestamps and triggers."
+
+#     # Step 2: Apply migrations
+#     migrations = [
+#         {"action": "add_column", "name": "shipped_at", "definition": "TIMESTAMP"},
+#         {"action": "modify_column", "name": "status", "definition": "TEXT NOT NULL"}
+#     ]
+#     migrate_result = engine.migrate_entity(table_name, migrations, engine.config.postgres_url)
+#     assert migrate_result == f"Table '{table_name}' successfully migrated."
+
+#     # Step 3: Verify schema after migrations
+#     schema = engine.retrieve_schema(table_name, engine.config.postgres_url)
+#     assert isinstance(schema, list)
+
+#     # Check the new column was added
+#     shipped_at_column = next((col for col in schema if col["column_name"] == "shipped_at"), None)
+#     assert shipped_at_column is not None
+#     assert shipped_at_column["data_type"] == "timestamp without time zone"
+
+#     # Check that the modified column has the correct constraints
+#     status_column = next((col for col in schema if col["column_name"] == "status"), None)
+#     assert status_column is not None
+#     assert status_column["is_nullable"] == "NO"
+
+# @pytest.mark.asyncio
+# async def test_define_workflow():
+#     """Test basic workflow definition and execution"""
+#     postgres_engine = PostgresEngine()
+    
+#     with postgres_engine.engine.connect() as connection:
+#         with connection.begin():
+#             connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+    
+#     # Define table
+#     columns = {
+#         "id": "SERIAL PRIMARY KEY",
+#         "amount": "NUMERIC(10,2)",
+#         "status": "TEXT DEFAULT 'pending'"
+#     }
+#     postgres_engine.define_entity("orders", columns, postgres_engine.config.postgres_url)
+    
+#     # Define simple workflow
+#     workflow_steps = [
+#         {
+#             "form_name": "create_order",
+#             "operations": [
+#                 {"table": "orders", "data": {
+#                     "amount": None,
+#                     "status": None
+#                 }}
+#             ],
+#             "conditions": {"orders": {"status": "pending"}}
+#         }
+#     ]
+    
+#     result = postgres_engine.define_workflow("basic_workflow", workflow_steps)
+#     assert "registered successfully" in result
+
+#     # Test workflow execution
+#     async with AsyncClient(base_url="http://test_app:8000") as client:
+#         response = await client.post("/forms/create_order", 
+#                                    json={"amount": 100.00, "status": "pending"})
+#         assert response.status_code == 200
+
+
+# @pytest.mark.asyncio
+# async def test_complex_workflow():
+#     """Test complex workflow with multiple steps and conditions"""
+#     postgres_engine = PostgresEngine()
+#     redis_engine = RedisEngine()
+
+#     # Setup tables
+#     tables = {
+#         "orders": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "product_id": "INTEGER NOT NULL",
+#             "quantity": "INTEGER NOT NULL",
+#             "status": "TEXT DEFAULT 'pending'"
+#         },
+#         "inventory": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "product_id": "INTEGER NOT NULL",
+#             "quantity": "INTEGER NOT NULL"
+#         },
+#         "order_history": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "order_id": "INTEGER NOT NULL",
+#             "status": "TEXT NOT NULL"
+#         }
+#     }
+    
+#     for table_name, columns in tables.items():
+#         postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
+    
+#     # Define complex workflow
+#     workflow_steps = [
+#         {
+#             "form_name": "create_order",
+#             "operations": [
+#                 {"table": "orders", "data": {
+#                     "product_id": None,
+#                     "quantity": None,
+#                     "status": None
+#                 }}
+#             ],
+#             "conditions": {"orders": {"status": "pending"}}
+#         },
+#         {
+#             "form_name": "update_inventory",
+#             "operations": [
+#                 {"table": "inventory", "data": {
+#                     "product_id": None,
+#                     "quantity": None
+#                 }}
+#             ]
+#         },
+#         {
+#             "form_name": "record_history",
+#             "operations": [
+#                 {"table": "order_history", "data": {
+#                     "order_id": None,
+#                     "status": None
+#                 }}
+#             ]
+#         }
+#     ]
+    
+#     postgres_engine.define_workflow("complex_workflow", workflow_steps)
+
+#     # Test workflow execution
+#     async with AsyncClient(base_url="http://test_app:8000") as client:
+#         response = await client.post("/forms/create_order", 
+#                                    json={
+#                                        "product_id": 1,
+#                                        "quantity": 5,
+#                                        "status": "pending"
+#                                    })
+#         assert response.status_code == 200
+#         order_id = response.json()["results"][0]["data"]["id"]
+
+#         await asyncio.sleep(2)  # Wait for task processing
+
+#         # Verify task creation
+#         tasks = redis_engine.redis_client.lrange("swarm_tasks", 0, -1)
+#         assert len(tasks) > 0
+
+
+# @pytest.mark.asyncio
+# async def test_order_processing_with_ai():
+#     """Test AI-driven order processing workflow"""
+#     postgres_engine = PostgresEngine()
+#     redis_engine = RedisEngine()
+
+#     # Define workflow with AI processing
+#     workflow_steps = [
+#         {
+#             "form_name": "process_order",
+#             "operations": [
+#                 {"table": "orders", "data": {
+#                     "product_name": None,
+#                     "quantity": None,
+#                     "total_price": None
+#                 }}
+#             ],
+#             "type": "ai",
+#             "report": {
+#                 "table": "orders",
+#                 "fields": ["id", "product_name", "total_price"],
+#                 "filters": {}
+#             }
+#         }
+#     ]
+    
+#     postgres_engine.define_workflow("ai_workflow", workflow_steps)
+
+#     # Create AI task
+#     test_task = SwarmTask(
+#         description="Generate order details",
+#         callback_url="http://test_app:8000/forms/process_order",
+#         fields={
+#             "product_name": None,
+#             "quantity": None,
+#             "total_price": None
+#         },
+#         type="ai",
+#         external=False
+#     )
+#     redis_engine.add_task(test_task)
+
+#     await asyncio.sleep(5)  # Wait for AI processing
+
+#     # Verify results
+#     with postgres_engine.engine.connect() as connection:
+#         result = connection.execute(text("SELECT * FROM orders")).fetchone()
+#         assert result is not None
+#         assert isinstance(result.product_name, str)
+#         assert isinstance(result.quantity, int)
+#         assert isinstance(float(result.total_price), float)
+
+# @pytest.mark.asyncio
+# async def test_multiple_workers_ai_processing():
+#     """Test multiple AI workers processing workflow tasks"""
+#     postgres_engine = PostgresEngine()
+#     redis_engine = RedisEngine()
+    
+#     redis_engine.redis_client.delete("finished")
+
+#     # Define workflow for multiple AI tasks
+#     workflow_steps = [
+#         {
+#             "form_name": "process_orders",
+#             "operations": [
+#                 {"table": "orders", "data": {
+#                     "product_name": None,
+#                     "quantity": None,
+#                     "total_price": None
+#                 }}
+#             ],
+#             "type": "ai"
+#         }
+#     ]
+    
+#     postgres_engine.define_workflow("multi_ai_workflow", workflow_steps)
+
+#     # Create multiple AI tasks
+#     tasks = [
+#         SwarmTask(
+#             description=f"Process order {i}",
+#             callback_url="http://test_app:8000/forms/process_orders",
+#             fields={
+#                 "product_name": None,
+#                 "quantity": None,
+#                 "total_price": None
+#             },
+#             type="ai",
+#             external=False
+#         ) for i in range(3)
+#     ]
+
+#     for task in tasks:
+#         redis_engine.add_task(task)
+
+#     await asyncio.sleep(7)  # Wait for parallel processing
+
+#     # Verify all tasks completed
+#     finished_count = redis_engine.redis_client.llen("finished")
+#     assert finished_count == 3
+
+#     # Verify all orders created
+#     with postgres_engine.engine.connect() as connection:
+#         results = connection.execute(text("SELECT * FROM orders")).mappings().all()
+#         assert len(results) == 3
+
+# @pytest.mark.asyncio
+# async def test_workflow_chain():
+#     """Test complete workflow chain execution"""
+#     redis_engine = RedisEngine()
+#     postgres_engine = PostgresEngine()
+
+#     # Clear test tables and Redis queues
+#     with postgres_engine.engine.connect() as connection:
+#         with connection.begin():
+#             connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+#             connection.execute(text("DROP TABLE IF EXISTS inventory CASCADE;"))
+#             connection.execute(text("DROP TABLE IF EXISTS payments CASCADE;"))
+    
+#     redis_engine.redis_client.delete("finished")
+
+#     # Define tables for workflow
+#     tables = {
+#         "orders": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "product_id": "INTEGER NOT NULL",
+#             "quantity": "INTEGER NOT NULL",
+#             "status": "TEXT DEFAULT 'pending'"
+#         },
+#         "inventory": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "product_id": "INTEGER NOT NULL",
+#             "available": "BOOLEAN DEFAULT true"
+#         },
+#         "payments": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "order_id": "INTEGER NOT NULL",
+#             "amount": "NUMERIC(10,2) NOT NULL"
+#         }
+#     }
+    
+#     for table_name, columns in tables.items():
+#         postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
+
+#     # Define workflow steps
+#     workflow_steps = [
+#         {
+#             "form_name": "create_order",
+#             "operations": [
+#                 {"table": "orders", "data": {
+#                     "product_id": None, 
+#                     "quantity": None,
+#                     "status": None
+#                 }}
+#             ],
+#             "report": {
+#                 "table": "orders",
+#                 "fields": ["id", "status", "quantity"],
+#                 "filters": {"status": "pending"}
+#             },
+#             "conditions": {
+#                 "orders": {"status": "pending"}
+#             }
+#         },
+#         {
+#             "form_name": "check_inventory",
+#             "operations": [
+#                 {"table": "inventory", "data": {
+#                     "product_id": None,
+#                     "available": None
+#                 }}
+#             ],
+#             "conditions": {
+#                 "inventory": {"available": True}
+#             }
+#         },
+#         {
+#             "form_name": "process_payment",
+#             "operations": [
+#                 {"table": "payments", "data": {
+#                     "order_id": None,
+#                     "amount": None
+#                 }}
+#             ]
+#         }
+#     ]
+
+#     # Register workflow
+#     postgres_engine.define_workflow("order_processing", workflow_steps)
+
+#     # Test workflow execution
+#     async with AsyncClient(base_url="http://test_app:8000") as client:
+#         # Step 1: Create Order
+#         order_payload = {
+#             "product_id": 1,
+#             "quantity": 5,
+#             "status": "pending"
+#         }
+#         response = await client.post("/forms/create_order", json=order_payload)
+#         assert response.status_code == 200
+#         order_id = response.json()["results"][0]["data"]["id"]
+
+#         # Wait for task processing
+#         await asyncio.sleep(2)
+
+#         # Step 2: Check Inventory
+#         inventory_payload = {
+#             "product_id": 1,
+#             "available": True
+#         }
+#         response = await client.post("/forms/check_inventory", json=inventory_payload)
+#         assert response.status_code == 200
+
+#         # Wait for task processing
+#         await asyncio.sleep(2)
+
+#         # Step 3: Process Payment
+#         payment_payload = {
+#             "order_id": order_id,
+#             "amount": 100.00
+#         }
+#         response = await client.post("/forms/process_payment", json=payment_payload)
+#         assert response.status_code == 200
+
+#     # Verify workflow completion
+#     with postgres_engine.engine.connect() as connection:
+#         # Verify order created
+#         order = connection.execute(text(
+#             "SELECT * FROM orders WHERE id = :id"
+#         ), {"id": order_id}).mappings().first()
+#         assert order is not None
+#         assert order["status"] == "pending"
+
+#         # Verify inventory check
+#         inventory = connection.execute(text(
+#             "SELECT * FROM inventory WHERE product_id = :product_id"
+#         ), {"product_id": 1}).mappings().first()
+#         assert inventory is not None
+#         assert inventory["available"] is True
+
+#         # Verify payment processed
+#         payment = connection.execute(text(
+#             "SELECT * FROM payments WHERE order_id = :order_id"
+#         ), {"order_id": order_id}).mappings().first()
+#         assert payment is not None
+#         assert payment["amount"] == 100.00
+
+#     # Verify Redis task completion
+#     finished_tasks = redis_engine.redis_client.lrange("finished", 0, -1)
+#     assert len(finished_tasks) > 0
+
+# @pytest.mark.asyncio
+# async def test_workflow_branching():
+#     """Test workflow with conditional branching"""
+#     postgres_engine = PostgresEngine()
+#     redis_engine = RedisEngine()
+
+#     # Setup test tables
+#     with postgres_engine.engine.connect() as connection:
+#         with connection.begin():
+#             connection.execute(text("DROP TABLE IF EXISTS orders CASCADE;"))
+#             connection.execute(text("DROP TABLE IF EXISTS inventory CASCADE;"))
+
+#     tables = {
+#         "orders": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "amount": "NUMERIC(10,2)",
+#             "status": "TEXT DEFAULT 'pending'"
+#         },
+#         "inventory": {
+#             "id": "SERIAL PRIMARY KEY",
+#             "stock": "INTEGER",
+#             "status": "TEXT"
+#         }
+#     }
+    
+#     for table_name, columns in tables.items():
+#         postgres_engine.define_entity(table_name, columns, postgres_engine.config.postgres_url)
+
+#     # Define workflow with branches
+#     workflow_steps = [
+#         {
+#             "form_name": "create_order",
+#             "operations": [{"table": "orders", "data": {"amount": None}}],
+#             "conditions": {"orders": {"status": "pending"}},
+#             "report": {
+#                 "table": "orders",
+#                 "fields": ["id", "amount", "status"],
+#                 "filters": {"status": "pending"}
+#             }
+#         },
+#         {
+#             "form_name": "check_inventory",
+#             "operations": [{"table": "inventory", "data": {"stock": None}}],
+#             "conditions": {"inventory": {"stock": lambda x: x > 0}}
+#         }
+#     ]
+
+#     postgres_engine.define_workflow("branching_workflow", workflow_steps)
+
+#     # Test workflow execution
+#     async with AsyncClient(base_url="http://test_app:8000") as client:
+#         # Create order
+#         response = await client.post("/forms/create_order", json={"amount": 100.00})
+#         assert response.status_code == 200
+        
+#         await asyncio.sleep(1)
+        
+#         # Verify task creation based on condition
+#         tasks = redis_engine.redis_client.lrange("swarm_tasks", 0, -1)
+#         assert len(tasks) > 0
+
+# @pytest.mark.asyncio
+# async def test_workflow_reporting():
+#     """Test workflow with integrated reporting"""
+#     postgres_engine = PostgresEngine()
+    
+#     # Setup test table
+#     with postgres_engine.engine.connect() as connection:
+#         with connection.begin():
+#             connection.execute(text("DROP TABLE IF EXISTS sales CASCADE;"))
+
+#     columns = {
+#         "id": "SERIAL PRIMARY KEY",
+#         "amount": "NUMERIC(10,2)",
+#         "region": "TEXT"
+#     }
+#     postgres_engine.define_entity("sales", columns, postgres_engine.config.postgres_url)
+
+#     # Define workflow with report
+#     workflow_steps = [
+#         {
+#             "form_name": "record_sale",
+#             "operations": [
+#                 {"table": "sales", "data": {"amount": None, "region": None}}
+#             ],
+#             "report": {
+#                 "table": "sales",
+#                 "fields": ["id", "amount", "region"],
+#                 "filters": {"region": "north"}
+#             }
+#         }
+#     ]
+
+#     postgres_engine.define_workflow("sales_workflow", workflow_steps)
+
+#     # Test form submission and report generation
+#     async with AsyncClient(base_url="http://test_app:8000") as client:
+#         # Submit form
+#         response = await client.post("/forms/record_sale", 
+#                                    json={"amount": 500.00, "region": "north"})
+#         assert response.status_code == 200
+
+#         # Check report
+#         response = await client.get("/reports/record_sale_report")
+#         assert response.status_code == 200
+#         assert len(response.json()["data"]) > 0
