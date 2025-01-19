@@ -11,8 +11,6 @@ Read [contributing.md](CONTRIBUTING.md)
 
 ### Coding Standards
 
-- Follow PEP 8 for Python code
-- Use Vue.js style guide for frontend code
 - Write tests for new features
 - Update documentation as needed
 

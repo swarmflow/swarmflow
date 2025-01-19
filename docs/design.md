@@ -1,12 +1,8 @@
-#Swarmflow Design
+# Swarmflow Design
 
 Goal: To provide a general working guideline of how this prroject will be designed and developed. If you are a contributor, please follow this guideline. And ask in the Discord if you have any questions.
 
 ## Definitions
-### Admin UI
-A basic chatbot that sends commands to the CEO agent and displays the results in a sideview.
-
-Here's a link to the UI Design on [figma](https://www.figma.com/design/VVl8IncPD55ZAiSxOUpQpw/Untitled?node-id=0-1&t=RpbAfxyAiq57S7Az-1)
 
 ### CEO Agent
 An LLM agent that is responsible for querying the database and modifying the database and middleware.
@@ -38,11 +34,11 @@ The LLM proccesses that make up the swarm and can execute tasks.
 ### Swarm Design (for prototype)
 - Python Middleware (see /core)
 - Postgres
-- Admin UI (vue+vite) (see /admin)
+- Admin interface to interact with AI CEO
 - Redis for task queue
 - Agent Server (see /worker_agent)
 ## Deployment
-- Testing: run docker compose on testing .yml
+- Testing: run `docker compose -f docker_compose.test.yml up --build`
 - Local Hosting: run docker compose in root
 - Cloud Hosting: TBD
 
